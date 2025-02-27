@@ -1,0 +1,43 @@
+Building a prediction model on house prices. 
+SIGN UP HERE TO PICK CITIES
+
+Business case
+ Your business case is to operate a chain of airbnbs. You need a pricing model. 
+
+Part I. Modelling
+1. Go to inside airbnb and pick a city. Your core dataset should have at least 10K rows. Go back in time and download listings data for an earlier quarter. (7p)
+
+Carry out data wrangling such as extracting amenities and imputing missing values. 
+Think about the process before jumping in and explain your variable selection and feature engineering choices. 
+You can use the code of the case study or AI for coding. 
+2. Build 5 different predictive models (7p)
+
+   a. OLS  
+
+   b. LASSO  
+
+   c. Random Forest  
+
+   d. Boosting of your choice  
+
+   e. Something else of your choice. Could be another boosting algo, or something else.
+
+
+
+3. Compare models in terms of fit and time. (6p)
+
+Create a horserace table. 
+Discuss performance. 
+4. Take two models (RF and a boosting model) and analyze them. (5p)
+
+Show feature importance. 
+Compare the 10 most important features. 
+Discuss your findings. 
+Part II. Validity
+5. Let us have two "live" datasets. (5p)
+
+   A. Download another (later) date.  Repeat data wrangling
+
+   B. Download another city in the same country or region, with at least 3K observations. Repeat data wrangling.
+
+6. Use your 5 core models on the A. Later date and B. Other city data. Compare model performance and discuss the experience. (5p)
