@@ -1,0 +1,38 @@
+# Install required packages if not already installed
+if (!require(tidyverse)) install.packages("tidyverse")
+if (!require(haven)) install.packages("haven")
+if (!require(caret)) install.packages("caret")
+if (!require(glmnet)) install.packages("glmnet")
+
+# Load required packages
+library(tidyverse)
+library(haven)
+library(caret)
+
+# Load the dataset
+cps_data <- read.csv("morg-2014-emp.csv")
+
+# Display the first few rows
+head(cps_data)
+
+# Get unique occupation codes and their frequencies
+occupation_counts <- cps_data %>%
+  count(occ2012) %>%
+  arrange(desc(n))
+
+# Display the top occupations
+head(occupation_counts, 20)
+
+# Choose an occupation (example: code 0205 - Farmers)
+selected_occupation <- 0205  # Replace with your chosen occupation code
+
+# Filter data for the selected occupation
+occupation_data <- cps_data %>%
+  filter(occ2012 == selected_occupation)
+
+# Check the number of observations
+nrow(occupation_data)
+
+# Basic summary statistics of earnings for this occupation
+summary(occupation_data)
+
