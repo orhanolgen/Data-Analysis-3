@@ -163,3 +163,26 @@ ggplot(data, aes(x = educ, y = w)) +
        y = "Hourly Earnings ($)") +
   theme_minimal() +
   theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Build four linear regression models of increasing complexity
+
+# Model 1: Simple model with only age as predictor
+model1 <- lm(w ~ age, data = data)
+summary(model1)
+
+# Model 2: Adding gender and race
+model2 <- lm(w ~ age + sex, data = data)
+summary(model2)
+
+# Model 3: Adding educ
+model3 <- lm(w ~ age + sex + race + educ, data = data)
+summary(model3)
+
+# Model 4: Most complex model with additional variables
+model4 <- lm(w ~ age + agesq + sex + race + marital + educ + ownchild, data = data)
+summary(model4)
+
+stargazer(model1, model2, model3, model4, 
+          type = "text", title = "Regression Model Summary", 
+          column.labels = c("Model 1", "Model 2", "Model 3", "Model 4"),
+          digits = 3, omit.stat = c("f", "ser"))
