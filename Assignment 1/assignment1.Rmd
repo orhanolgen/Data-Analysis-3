@@ -117,5 +117,49 @@ summary(data %>% select(w, age, sex, educ, race, marital))
 cat("Missing values in key variables:\n")
 print(colSums(is.na(data %>% select(w, age, sex, educ, race, marital))))
 
+# Remove outliers using IQR method
+Q1 <- quantile(data$w, 0.25, na.rm = TRUE)
+Q3 <- quantile(data$w, 0.75, na.rm = TRUE)
+IQR <- Q3 - Q1
 
+# Define lower and upper bounds
+lower_bound <- Q1 - 1.5 * IQR
+upper_bound <- Q3 + 1.5 * IQR
 
+# Filter data to exclude outliers
+data <- data %>% filter(w >= lower_bound & w <= upper_bound)
+
+# Exploratory data analysis
+# Histogram of hourly earnings
+ggplot(data, aes(x = w)) +
+  geom_histogram(bins = 50, fill = "steelblue", color = "white") +
+  labs(title = "Distribution of Hourly Earnings for teachers",
+       x = "Earnings per Hour ($)",
+       y = "Count") +
+  theme_minimal()
+
+# Boxplot of earnings by gender
+ggplot(data, aes(x = sex, y = w, fill = sex)) +
+  geom_boxplot() +
+  labs(title = "Hourly Earnings by Gender (No Outliers)",
+       x = "Gender",
+       y = "Earnings per Hour ($)") +
+  theme_minimal()
+
+# Scatterplot of earnings vs age
+ggplot(data, aes(x = age, y = w, color = sex)) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(method = "loess") +
+  labs(title = "Earnings vs Age by Gender (No Outliers)",
+       x = "Age",
+       y = "Hourly Earnings ($)") +
+  theme_minimal()
+
+# Boxplot of earnings by education level
+ggplot(data, aes(x = educ, y = w)) +
+  geom_boxplot() +
+  labs(title = "Earnings by Education Level (No Outliers)",
+       x = "Education Level",
+       y = "Hourly Earnings ($)") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
