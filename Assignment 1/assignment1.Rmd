@@ -250,3 +250,28 @@ comparison_table <- data.frame(
                 length(coef(model4)))
 )
 print(comparison_table)
+
+# Visualizing model performance metrics
+# Create a data frame for plotting
+plot_data <- data.frame(
+  Model = factor(1:4, labels = c("Model 1", "Model 2", "Model 3", "Model 4")),
+  RMSE = rmse_full,
+  CV_RMSE = cv_rmse
+)
+
+# Reshape for ggplot
+plot_data_long <- tidyr::pivot_longer(
+  plot_data,
+  cols = c(RMSE, CV_RMSE),
+  names_to = "Metric",
+  values_to = "Value"
+)
+
+# Plot RMSE and CV-RMSE
+ggplot(plot_data_long, aes(x = Model, y = Value, group = Metric, color = Metric)) +
+  geom_line(size = 1) +
+  geom_point(size = 3) +
+  labs(title = "Model Performance Metrics",
+       x = "Model Complexity",
+       y = "RMSE Value") +
+  theme_minimal()
