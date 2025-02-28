@@ -186,3 +186,67 @@ stargazer(model1, model2, model3, model4,
           type = "text", title = "Regression Model Summary", 
           column.labels = c("Model 1", "Model 2", "Model 3", "Model 4"),
           digits = 3, omit.stat = c("f", "ser"))
+
+
+# Create a function to calculate RMSE
+rmse <- function(model, data) {
+  residuals <- data$w - predict(model, data)
+  sqrt(mean(residuals^2, na.rm = TRUE))
+}
+
+# Calculate RMSE on full sample
+rmse_full <- sapply(list(model1, model2, model3, model4), rmse, data = data)
+names(rmse_full) <- c("Model 1", "Model 2", "Model 3", "Model 4")
+print(rmse_full)
+
+# Cross-validation RMSE using k-fold cross-validation
+train_control <- trainControl(method = "cv", number = 10)
+
+# Define formulas for each model
+formula1 <- formula(w ~ age)
+formula2 <- formula(w ~ age + sex)
+formula3 <- formula(w ~ age + sex + race + educ)
+formula4 <- formula(w ~ age + agesq + sex + race + marital + educ + ownchild)
+
+# Cross-validation for each model
+# Note: This might take some time to run
+cv_model1 <- train(formula1, data = data, method = "lm", trControl = train_control)
+cv_model2 <- train(formula2, data = data, method = "lm", trControl = train_control)
+cv_model3 <- train(formula3, data = data, method = "lm", trControl = train_control)
+cv_model4 <- train(formula4, data = data, method = "lm", trControl = train_control)
+
+# Extract cross-validated RMSE
+cv_rmse <- c(
+  cv_model1$results$RMSE,
+  cv_model2$results$RMSE,
+  cv_model3$results$RMSE,
+  cv_model4$results$RMSE
+)
+names(cv_rmse) <- c("Model 1", "Model 2", "Model 3", "Model 4")
+print(cv_rmse)
+
+# Calculate BIC values
+bic_values <- c(
+  BIC(model1),
+  BIC(model2),
+  BIC(model3),
+  BIC(model4)
+)
+names(bic_values) <- c("Model 1", "Model 2", "Model 3", "Model 4")
+print(bic_values)
+
+# Create a comparison table for all metrics
+comparison_table <- data.frame(
+  Model = c("Model 1 (Age only)", 
+            "Model 2 (Age, Gender, Race)", 
+            "Model 3 (Age, Gender, Race, Educ)", 
+            "Model 4 (Age, Age², Gender, Race, Marital, Education, Children)"),
+  RMSE_Full = rmse_full,
+  CV_RMSE = cv_rmse,
+  BIC = bic_values,
+  Variables = c(length(coef(model1)), 
+                length(coef(model2)), 
+                length(coef(model3)), 
+                length(coef(model4)))
+)
+print(comparison_table)
