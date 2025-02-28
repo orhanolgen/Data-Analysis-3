@@ -1,38 +1,121 @@
+# CLEAR MEMORY
+rm(list=ls())
+
 # Install required packages if not already installed
 if (!require(tidyverse)) install.packages("tidyverse")
 if (!require(haven)) install.packages("haven")
 if (!require(caret)) install.packages("caret")
 if (!require(glmnet)) install.packages("glmnet")
+if (!require(cowplot)) install.packages("cowplot")
+if (!require(estimatr)) install.packages("estimatr")
+if (!require(huxtable)) install.packages("huxtable")
+if (!require(modelsummary)) install.packages("modelsummary")
+if (!require(janitor)) install.packages("janitor")
 
 # Load required packages
 library(tidyverse)
 library(haven)
 library(caret)
+library(cowplot)
+library(boot)
+library(estimatr)
+library(huxtable)
+library(stargazer)
+library(modelsummary)
+library(janitor)
 
 # Load the dataset
-cps_data <- read.csv("morg-2014-emp.csv")
+data_all <- read_csv("https://osf.io/download/4ay9x/", col_types = cols(.default = "?", state = "c"))
 
-# Display the first few rows
-head(cps_data)
+# Display basic information about the dataset
+head(data_all)
+dim(data_all)
 
-# Get unique occupation codes and their frequencies
-occupation_counts <- cps_data %>%
-  count(occ2012) %>%
-  arrange(desc(n))
+# Basic variable description 
+variable_descriptions <- data.frame(
+  Variable = c("hhid", "intmonth", "stfips", "weight", "earnwke", "uhours", 
+               "grade92", "race", "ethnic", "age", "sex", "marital", "ownchild",
+               "chldpres", "prcitshp", "state", "ind02", "occ2012", "class", 
+               "unionmme", "unioncov", "lfsr94", "earnhre"),
+  Description = c("Household ID", "Interview month", "State FIPS code", "Sample weight",
+                 "Weekly earnings", "Usual hours worked per week", 
+                 "Highest grade completed (31-46 scale)", "Race (1=White, 2=Black)", 
+                 "Ethnicity", "Age in years", "Sex (1=Male, 2=Female)", 
+                 "Marital status (1-7 scale)", "Number of own children", 
+                 "Children present", "Citizenship", "State",
+                 "Industry code", "Occupation code (2012 basis)", "Class of worker",
+                 "Union member", "Union coverage", "Labor force status",
+                 "Hourly earnings (calculated)")
+)
 
-# Display the top occupations
-head(occupation_counts, 20)
+# Print variable descriptions for reference
+print(variable_descriptions, row.names = FALSE)
 
-# Choose an occupation (example: code 0205 - Farmers)
-selected_occupation <- 0205  # Replace with your chosen occupation code
+# Check if we need to calculate hourly earnings or if it's already in the dataset
+if(!"earnhre" %in% names(data_all)) {
+  data_all <- data_all %>%
+    mutate(earnhre = earnwke / uhours)
+}
 
-# Filter data for the selected occupation
-occupation_data <- cps_data %>%
-  filter(occ2012 == selected_occupation)
+# Choose an occupation (code 2310 - Elementary and middle school teachers)
+data_all_teachers <- data_all %>%
+  filter(occ2012 == 2310)
 
-# Check the number of observations
-nrow(occupation_data)
+# Check the number of observations in our chosen occupation
+n_teachers <- nrow(data_all_teachers)
+cat("Number of observations for teachers (occupation code 0205):", n_teachers, "\n")
 
-# Basic summary statistics of earnings for this occupation
-summary(occupation_data)
+# Create education categories based on grade92
+data <- data_all_teachers %>%
+  mutate(
+    # Convert sex to factor
+    sex = factor(ifelse(sex == 1, "Male", "Female")),
+    female = as.numeric(sex == "Female"),
+    
+    # Convert race to factor
+    race = factor(case_when(
+      race == 1 ~ "White",
+      race == 2 ~ "Black",
+      TRUE ~ "Other"
+    )),
+    
+    # Create education categories from grade92
+    educ = case_when(
+      grade92 >= 31 & grade92 <= 38 ~ "Less than high school",
+      grade92 == 39 ~ "High school",
+      grade92 >= 40 & grade92 <= 42 ~ "Some college",
+      grade92 == 43 ~ "College",
+      grade92 >= 44 & grade92 <= 46 ~ "Advanced degree",
+      TRUE ~ NA_character_
+    ),
+    educ = factor(educ, levels = c("Less than high school", "High school", 
+                                    "Some college", "College", "Advanced degree")),
+    
+    # Convert marital status to factor with meaningful labels
+    marital = factor(case_when(
+      marital == 1 | marital == 2 ~ "Married, spouse present",
+      marital == 3 ~ "Married, spouse absent",
+      marital == 4 ~ "Widowed",
+      marital == 5 ~ "Divorced",
+      marital == 6 ~ "Separated",
+      marital == 7 ~ "Never married",
+      TRUE ~ NA_character_
+    )),
+    
+    # Create target variable and other features
+    w = earnhre,  # Our target: hourly earnings
+    lnw = log(earnhre + 0.01),  # Log transformation (adding small value to handle zeros)
+    agesq = age^2  # Age squared for non-linear effects
+  ) %>%
+  # Remove rows with missing values in key variables
+  filter(!is.na(w), !is.na(age), !is.na(sex))
+
+# Display summary statistics of the cleaned dataset
+summary(data %>% select(w, age, sex, educ, race, marital))
+
+# Quick check of data quality
+cat("Missing values in key variables:\n")
+print(colSums(is.na(data %>% select(w, age, sex, educ, race, marital))))
+
+
 
