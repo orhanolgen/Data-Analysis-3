@@ -10,7 +10,9 @@ This folder contains all relevant files and outputs for **Assignment 3** of the 
 ### 📄 Key Files
 
 - `Data_cleaning.Rmd` – Script and rendered report for cleaning the dataset, constructing the target, and engineering predictors.  
-- `Tasks 1.Rmd` – Contains the full modeling workflow, including cross-validation, hyperparameter tuning, evaluation, and model comparison.  
+- `Tasks 1.Rmd` – Contains the full modeling workflow, including cross-validation, hyperparameter tuning, evaluation, and model comparison.
+- `Tasks 2.Rmd` – Contains the industry-specific analysis workflow, comparing model performance across manufacturing and services sectors. Includes separate model training, threshold optimization, feature importance analysis, and comparative evaluation with the same loss function applied to both industries.
+- `summary.pdf` – A concise 5-page executive summary targeted at data science team leaders and senior managers. This document highlights key findings, methodology, results interpretation, and business recommendations from both the general fast growth prediction models and the industry-specific analysis. Includes essential visu   
 - `da_helper_functions.R` – Collection of custom R functions used throughout the project (e.g., plotting and performance evaluation).  
 - `theme_bg.R` – Custom ggplot2 theme used for consistent and minimalistic visualizations.
 
