@@ -1,0 +1,894 @@
+---
+title: "DA3 Assignment 3 - Task 2: Industry Comparison Analysis"
+author: "Student Name"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    theme: flatly
+    highlight: tango
+    toc: true
+    toc_float: true
+    code_folding: show
+---
+
+# Task 2: Industry Comparison Analysis
+
+In this section, we extend our analysis by examining how our model
+performs across different industry categories. The Bisnode dataset
+contains two main industry groups: manufacturing and services (which
+includes repair, accommodation, and food services). We'll investigate
+whether:
+
+1.  The predictors of fast growth differ between manufacturing and
+    service firms
+2.  The same model achieves different performance levels across these
+    industries
+3.  Optimal classification thresholds vary by industry
+
+## Data Preparation and Industry Analysis
+
+First, we'll load the previously cleaned dataset and examine the
+industry distribution.
+
+```{r load_libraries_and_data}
+# Clear environment
+rm(list = ls())
+
+# Set working directories and paths
+# Note: You may need to adjust these paths for your system
+setwd("C:/Users/Orhan Olgen/OneDrive - Central European University (CEU GmbH Hungarian Branch Office)/Desktop/CEU/Machine Learning/Data-Analysis-3/Assignment 3/Data-Analysis-3/Assignment 3")
+data_dir <- "C:/Users/Orhan Olgen/OneDrive - Central European University (CEU GmbH Hungarian Branch Office)/Desktop/CEU/Machine Learning/Data-Analysis-3/Assignment 3/Data-Analysis-3/Assignment 3/Data/"
+output <- "C:/Users/Orhan Olgen/OneDrive - Central European University (CEU GmbH Hungarian Branch Office)/Desktop/CEU/Machine Learning/Data-Analysis-3/Assignment 3/Data-Analysis-3/Assignment 3/Figures/"
+
+
+# Load helper functions
+source("theme_bg.R")
+source("da_helper_functions.R")
+
+install.packages("recipes")
+
+# Import libraries
+# Data manipulation and visualization
+library(haven)
+library(purrr)
+library(skimr)
+library(kableExtra)
+library(cowplot)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+
+# Modeling packages
+library(glmnet)      # For regularized regression (LASSO)
+library(margins)     # For marginal effects
+library(gmodels)     # For model utilities
+library(lspline)     # For linear splines
+library(sandwich)    # For robust standard errors
+
+# Machine learning and evaluation
+library(caret)       # For model training and evaluation
+library(pROC)        # For ROC curve analysis
+library(ranger)      # For random forest modeling
+library(rattle)      # For model visualization
+library(rpart)       # For decision trees
+library(partykit)    # For tree visualization
+library(rpart.plot)  # For tree plotting
+library(viridis)     # For color schemes
+
+# Load the cleaned dataset
+data <- read_rds(paste0(data_dir, "bisnode_firms_clean.rds"))
+
+# Examine industry categories
+table(data$ind)
+```
+
+Let's create our two broad industry categories: manufacturing (combining
+ind = 1, 2) and services (ind = 3).
+
+```{r create_industry_categories}
+# Create broader industry categories
+data <- data %>% 
+  mutate(industry_category = case_when(
+    ind %in% c(1, 2) ~ "manufacturing",  # Merge Auto (1) and Equipment (2) manufacturing
+    ind == 3 ~ "services",               # Hotels and restaurants (3)
+    TRUE ~ "other"
+  ))
+
+# Verify the new industry categories
+industry_table <- table(data$industry_category, data$ind)
+print(industry_table)
+
+# Calculate percentages by industry
+industry_split_pct <- prop.table(table(data$industry_category)) * 100
+cat("Dataset composition:\n")
+cat("Manufacturing: ", round(industry_split_pct["manufacturing"], 1), "%\n", sep="")
+cat("Services: ", round(industry_split_pct["services"], 1), "%\n", sep="")
+```
+
+The table shows how we've combined industries: categories 1 and 2 are
+merged into "manufacturing" while category 3 becomes "services". Let's
+explore the prevalence of fast-growing firms across these broader
+industry categories.
+
+```{r industry_exploration}
+# Calculate fast growth prevalence by industry
+industry_growth_rates <- data %>%
+  group_by(industry_category) %>%
+  summarize(
+    total_firms = n(),
+    fast_growing_firms = sum(fast_growth),
+    growth_rate = mean(fast_growth) * 100
+  )
+
+# Display results
+kable(industry_growth_rates, 
+      caption = "Fast Growth Prevalence by Industry",
+      col.names = c("Industry Category", "Total Firms", "Fast Growing Firms", "Growth Rate (%)"),
+      digits = c(0, 0, 0, 1))
+
+# Create visualization of growth rates by industry
+ggplot(industry_growth_rates, aes(x = industry_category, y = growth_rate, fill = industry_category)) +
+  geom_bar(stat = "identity") +
+  geom_text(aes(label = paste0(round(growth_rate, 1), "%")), 
+            vjust = -0.5, size = 4) +
+  labs(
+    title = "Prevalence of Fast-Growing Firms by Industry",
+    x = "Industry Category",
+    y = "Percentage of Fast-Growing Firms",
+    fill = "Industry"
+  ) +
+  theme_bg() +
+  theme(legend.position = "none")
+
+# Compare key financial metrics between industries
+financial_comparison <- data %>%
+  group_by(industry_category) %>%
+  summarize(
+    avg_sales = mean(sales_mil, na.rm = TRUE),
+    avg_profit_margin = mean(profit_loss_year_pl, na.rm = TRUE),
+    avg_assets = mean(total_assets_bs, na.rm = TRUE),
+    avg_age = mean(age, na.rm = TRUE)
+  )
+
+kable(financial_comparison,
+      caption = "Comparison of Key Metrics by Industry",
+      col.names = c("Industry", "Avg Sales (million)", "Avg Profit Margin", 
+                    "Avg Assets (scaled)", "Avg Age (years)"),
+      digits = 2)
+```
+
+The data reveals interesting differences between sectors. Manufacturing
+appears to have a higher prevalence of fast-growing firms compared to
+services. Additionally, manufacturing firms tend to have higher average
+sales and assets, which aligns with the capital-intensive nature of this
+sector.
+
+## Creating Industry-Specific Datasets
+
+Now we'll split each industry's data into training and holdout sets.
+
+```{r create_industry_datasets}
+# Split data by industry
+data_manufacturing <- data %>% filter(industry_category == "manufacturing")
+data_services <- data %>% filter(industry_category == "services")
+
+# Verify dimensions
+cat("Full dataset dimensions:", dim(data), "\n")
+cat("Manufacturing dataset dimensions:", dim(data_manufacturing), "\n")
+cat("Services dataset dimensions:", dim(data_services), "\n")
+
+# Create training and holdout sets for each industry
+set.seed(13505)
+
+# Manufacturing
+train_indices_mfg <- as.integer(createDataPartition(data_manufacturing$fast_growth, p = 0.8, list = FALSE))
+data_train_mfg <- data_manufacturing[train_indices_mfg, ]
+data_holdout_mfg <- data_manufacturing[-train_indices_mfg, ]
+
+# Services
+train_indices_srv <- as.integer(createDataPartition(data_services$fast_growth, p = 0.8, list = FALSE))
+data_train_srv <- data_services[train_indices_srv, ]
+data_holdout_srv <- data_services[-train_indices_srv, ]
+
+# Check distribution of target variable in each subset
+industry_splits <- data.frame(
+  Dataset = c("Full Data", "Manufacturing", "Services"),
+  Total_Obs = c(nrow(data), nrow(data_manufacturing), nrow(data_services)),
+  Fast_Growth_Pct = c(
+    mean(data$fast_growth) * 100,
+    mean(data_manufacturing$fast_growth) * 100,
+    mean(data_services$fast_growth) * 100
+  ),
+  Train_Obs = c(NA, nrow(data_train_mfg), nrow(data_train_srv)),
+  Train_FG_Pct = c(
+    NA,
+    mean(data_train_mfg$fast_growth) * 100,
+    mean(data_train_srv$fast_growth) * 100
+  ),
+  Holdout_Obs = c(NA, nrow(data_holdout_mfg), nrow(data_holdout_srv)),
+  Holdout_FG_Pct = c(
+    NA,
+    mean(data_holdout_mfg$fast_growth) * 100,
+    mean(data_holdout_srv$fast_growth) * 100
+  )
+)
+
+kable(industry_splits,
+      caption = "Dataset Splits by Industry",
+      col.names = c("Dataset", "Total Obs", "% Fast Growth", 
+                    "Train Obs", "Train % FG", 
+                    "Holdout Obs", "Holdout % FG"),
+      digits = c(0, 0, 1, 0, 1, 0, 1))
+```
+
+The table confirms that our training/holdout splits preserve the
+original distribution of fast-growing firms in each industry. The
+manufacturing sector has a higher percentage of fast-growing firms
+compared to services, which may affect model performance.
+
+## Define Model and Loss Function
+
+We'll use the best performing model from Task 1 (Logistic Regression
+X4), applying it separately to each industry with the same loss
+function.
+
+```{r define_variables_loss}
+# Define variable sets (using X4 from Task 1)
+rawvars <-  c("curr_assets", "curr_liab", "extra_exp", "extra_inc", "extra_profit_loss", "fixed_assets",
+              "inc_bef_tax", "intang_assets", "inventories", "liq_assets", "material_exp", "personnel_exp",
+              "profit_loss_year", "sales", "share_eq", "subscribed_cap", "growth_past")
+qualityvars <- c("balsheet_flag", "balsheet_length", "balsheet_notfullyear")
+engvar <- c("total_assets_bs", "fixed_assets_bs", "liq_assets_bs", "curr_assets_bs",
+            "share_eq_bs", "subscribed_cap_bs", "intang_assets_bs", "extra_exp_pl",
+            "extra_inc_pl", "extra_profit_loss_pl", "inc_bef_tax_pl", "inventories_pl",
+            "material_exp_pl", "profit_loss_year_pl", "personnel_exp_pl")
+engvar2 <- c("extra_profit_loss_pl_quad", "inc_bef_tax_pl_quad",
+             "profit_loss_year_pl_quad", "share_eq_bs_quad")
+engvar3 <- c(grep("*flag_low$", names(data), value = TRUE),
+             grep("*flag_high$", names(data), value = TRUE),
+             grep("*flag_error$", names(data), value = TRUE),
+             grep("*flag_zero$", names(data), value = TRUE))
+d1 <-  c("d1_sales_mil_log_mod", "d1_sales_mil_log_mod_sq",
+         "flag_low_d1_sales_mil_log", "flag_high_d1_sales_mil_log")
+hr <- c("female", "ceo_age", "flag_high_ceo_age", "flag_low_ceo_age",
+        "flag_miss_ceo_age", "ceo_count", "labor_avg_mod",
+        "flag_miss_labor_avg", "foreign_management")
+# Define firm variables (removing ind and ind2_cat as we're splitting by industry_category)
+firm <- c("age", "age2", "new", "m_region_loc", "urban_m") 
+
+# Define X4 variables (our best model from Task 1, but without industry variables)
+X4 <- c("sales_mil_log", "sales_mil_log_sq", firm, engvar, engvar2, engvar3, d1, hr, qualityvars)
+
+# Define loss function (consistent with Task 1)
+FP <- 6  # Cost of false positive
+FN <- 5  # Cost of false negative
+cost <- FN/FP  # Cost ratio for ROC analysis
+```
+
+## Model Training for Manufacturing Industry
+
+We'll now train our logistic regression model for the manufacturing
+sector.
+
+```{r train_manufacturing_model}
+# Configure 5-fold cross-validation
+train_control <- trainControl(
+  method = "cv",              
+  number = 5,                 
+  classProbs = TRUE,          
+  summaryFunction = twoClassSummaryExtended,
+  savePredictions = TRUE      
+)
+
+# Train logistic regression model on manufacturing data
+set.seed(13505)
+logit_model_mfg <- train(
+  formula(paste0("fast_growth_f ~ ", paste0(X4, collapse = " + "))),
+  method = "glm",
+  data = data_train_mfg,
+  family = binomial,
+  trControl = train_control
+)
+
+# Calculate CV RMSE and AUC for manufacturing
+CV_RMSE_folds_mfg <- logit_model_mfg$resample[, c("Resample", "RMSE")]
+CV_RMSE_mfg <- mean(CV_RMSE_folds_mfg$RMSE)
+
+CV_AUC_folds_mfg <- list()
+for (fold in c("Fold1", "Fold2", "Fold3", "Fold4", "Fold5")) {
+  cv_fold <- logit_model_mfg$pred %>% filter(Resample == fold)
+  roc_obj <- roc(cv_fold$obs, cv_fold$fast_growth)
+  CV_AUC_folds_mfg[[fold]] <- as.numeric(roc_obj$auc)
+}
+CV_AUC_mfg <- mean(unlist(CV_AUC_folds_mfg))
+
+# Find optimal threshold for manufacturing using our loss function
+best_thresholds_cv_mfg <- list()
+expected_loss_cv_mfg <- list()
+
+prevalence_mfg <- mean(data_train_mfg$fast_growth)
+
+for (fold in c("Fold1", "Fold2", "Fold3", "Fold4", "Fold5")) {
+  cv_fold <- logit_model_mfg$pred %>% filter(Resample == fold)
+  roc_obj <- roc(cv_fold$obs, cv_fold$fast_growth)
+  
+  best_threshold <- coords(
+    roc_obj, 
+    "best", 
+    ret = "all", 
+    transpose = FALSE,
+    best.method = "youden", 
+    best.weights = c(cost, prevalence_mfg)
+  )
+  
+  best_thresholds_cv_mfg[[fold]] <- best_threshold$threshold
+  expected_loss_cv_mfg[[fold]] <- (best_threshold$fp*FP + best_threshold$fn*FN)/length(cv_fold$fast_growth)
+}
+
+# Average across folds
+best_threshold_mfg <- mean(unlist(best_thresholds_cv_mfg))
+expected_loss_mfg <- mean(unlist(expected_loss_cv_mfg))
+
+# Evaluate on holdout set
+mfg_predicted_probs <- predict(logit_model_mfg, newdata = data_holdout_mfg, type = "prob")
+data_holdout_mfg$pred_probs <- mfg_predicted_probs[, "fast_growth"]
+
+# Calculate holdout RMSE
+holdout_rmse_mfg <- RMSE(data_holdout_mfg$pred_probs, data_holdout_mfg$fast_growth)
+
+# Calculate holdout ROC and AUC
+roc_obj_holdout_mfg <- roc(data_holdout_mfg$fast_growth, data_holdout_mfg$pred_probs)
+auc_holdout_mfg <- as.numeric(roc_obj_holdout_mfg$auc)
+
+# Calculate expected loss on holdout with optimal threshold
+holdout_threshold_mfg <- coords(
+  roc_obj_holdout_mfg, 
+  x = best_threshold_mfg, 
+  input = "threshold",
+  ret = "all", 
+  transpose = FALSE
+)
+
+expected_loss_holdout_mfg <- (holdout_threshold_mfg$fp*FP + 
+                             holdout_threshold_mfg$fn*FN)/nrow(data_holdout_mfg)
+
+# Create confusion matrix
+mfg_predictions <- ifelse(
+  data_holdout_mfg$pred_probs < best_threshold_mfg, 
+  "no_fast_growth", 
+  "fast_growth"
+) %>% factor(levels = c("no_fast_growth", "fast_growth"))
+
+cm_mfg <- confusionMatrix(mfg_predictions, data_holdout_mfg$fast_growth_f)
+
+# Print key metrics for manufacturing model
+cat("Manufacturing Model Metrics:\n")
+cat("  CV RMSE:", round(CV_RMSE_mfg, 3), "\n")
+cat("  CV AUC:", round(CV_AUC_mfg, 3), "\n")
+cat("  Optimal Threshold:", round(best_threshold_mfg, 3), "\n")
+cat("  Holdout RMSE:", round(holdout_rmse_mfg, 3), "\n")
+cat("  Holdout AUC:", round(auc_holdout_mfg, 3), "\n")
+cat("  Expected Loss:", round(expected_loss_holdout_mfg, 3), "\n")
+```
+
+The manufacturing model's metrics reveal several important insights
+about its performance for predicting fast-growing firms. The CV RMSE of
+0.361 and holdout RMSE of 0.361 indicate consistent error rates between
+cross-validation and the holdout set, suggesting the model doesn't
+overfit.
+
+The AUC values (CV: 0.666, Holdout: 0.694) demonstrate moderate
+discriminative ability - better than random guessing (0.5) but far from
+perfect prediction. This indicates the model can partially distinguish
+between fast-growing and non-fast-growing manufacturing firms, though
+with considerable uncertainty.
+
+The most concerning metric is the infinite optimal threshold. This
+indicates that the ROC optimization procedure couldn't find any
+threshold that effectively balances sensitivity and specificity
+according to our cost function. Essentially, the model struggles to find
+a sensible decision boundary for classification under our defined loss
+function (FP=6, FN=5).
+
+The expected loss of 0.841 is relatively high, reflecting the
+classification challenges. This suggests that despite moderate AUC
+values, the model's practical utility for decision-making is limited by
+its inability to establish an optimal classification threshold.
+
+These results point to fundamental difficulties in predicting fast
+growth in manufacturing firms using our current approach, possibly due
+to more complex or different growth dynamics in this sector compared to
+services.
+
+## Model Training for Services Industry
+
+Now we'll train the same model for the services sector.
+
+```{r train_services_model}
+# Train logistic regression model on services data
+set.seed(13505)
+logit_model_srv <- train(
+  formula(paste0("fast_growth_f ~ ", paste0(X4, collapse = " + "))),
+  method = "glm",
+  data = data_train_srv,
+  family = binomial,
+  trControl = train_control
+)
+
+# Calculate CV RMSE and AUC for services
+CV_RMSE_folds_srv <- logit_model_srv$resample[, c("Resample", "RMSE")]
+CV_RMSE_srv <- mean(CV_RMSE_folds_srv$RMSE)
+
+CV_AUC_folds_srv <- list()
+for (fold in c("Fold1", "Fold2", "Fold3", "Fold4", "Fold5")) {
+  cv_fold <- logit_model_srv$pred %>% filter(Resample == fold)
+  roc_obj <- roc(cv_fold$obs, cv_fold$fast_growth)
+  CV_AUC_folds_srv[[fold]] <- as.numeric(roc_obj$auc)
+}
+CV_AUC_srv <- mean(unlist(CV_AUC_folds_srv))
+
+# Find optimal threshold for services using our loss function
+best_thresholds_cv_srv <- list()
+expected_loss_cv_srv <- list()
+
+prevalence_srv <- mean(data_train_srv$fast_growth)
+
+for (fold in c("Fold1", "Fold2", "Fold3", "Fold4", "Fold5")) {
+  cv_fold <- logit_model_srv$pred %>% filter(Resample == fold)
+  roc_obj <- roc(cv_fold$obs, cv_fold$fast_growth)
+  
+  best_threshold <- coords(
+    roc_obj, 
+    "best", 
+    ret = "all", 
+    transpose = FALSE,
+    best.method = "youden", 
+    best.weights = c(cost, prevalence_srv)
+  )
+  
+  best_thresholds_cv_srv[[fold]] <- best_threshold$threshold
+  expected_loss_cv_srv[[fold]] <- (best_threshold$fp*FP + best_threshold$fn*FN)/length(cv_fold$fast_growth)
+}
+
+# Average across folds
+best_threshold_srv <- mean(unlist(best_thresholds_cv_srv))
+expected_loss_srv <- mean(unlist(expected_loss_cv_srv))
+
+# Evaluate on holdout set
+srv_predicted_probs <- predict(logit_model_srv, newdata = data_holdout_srv, type = "prob")
+data_holdout_srv$pred_probs <- srv_predicted_probs[, "fast_growth"]
+
+# Calculate holdout RMSE
+holdout_rmse_srv <- RMSE(data_holdout_srv$pred_probs, data_holdout_srv$fast_growth)
+
+# Calculate holdout ROC and AUC
+roc_obj_holdout_srv <- roc(data_holdout_srv$fast_growth, data_holdout_srv$pred_probs)
+auc_holdout_srv <- as.numeric(roc_obj_holdout_srv$auc)
+
+# Calculate expected loss on holdout with optimal threshold
+holdout_threshold_srv <- coords(
+  roc_obj_holdout_srv, 
+  x = best_threshold_srv, 
+  input = "threshold",
+  ret = "all", 
+  transpose = FALSE
+)
+
+expected_loss_holdout_srv <- (holdout_threshold_srv$fp*FP + 
+                             holdout_threshold_srv$fn*FN)/nrow(data_holdout_srv)
+
+# Create confusion matrix
+srv_predictions <- ifelse(
+  data_holdout_srv$pred_probs < best_threshold_srv, 
+  "no_fast_growth", 
+  "fast_growth"
+) %>% factor(levels = c("no_fast_growth", "fast_growth"))
+
+cm_srv <- confusionMatrix(srv_predictions, data_holdout_srv$fast_growth_f)
+
+# Print key metrics for services model
+cat("Services Model Metrics:\n")
+cat("  CV RMSE:", round(CV_RMSE_srv, 3), "\n")
+cat("  CV AUC:", round(CV_AUC_srv, 3), "\n")
+cat("  Optimal Threshold:", round(best_threshold_srv, 3), "\n")
+cat("  Holdout RMSE:", round(holdout_rmse_srv, 3), "\n")
+cat("  Holdout AUC:", round(auc_holdout_srv, 3), "\n")
+cat("  Expected Loss:", round(expected_loss_holdout_srv, 3), "\n")
+```
+
+The services model shows better overall performance than the
+manufacturing model. With lower RMSE values (CV: 0.330, Holdout: 0.333)
+and higher AUC scores (CV: 0.724, Holdout: 0.719), it demonstrates
+superior predictive accuracy and discrimination ability. The consistent
+metrics between cross-validation and holdout sets indicate good
+generalization.
+
+However, like the manufacturing model, it also shows an infinite optimal
+threshold, suggesting difficulties in establishing a stable
+classification boundary under our cost function. Despite this challenge,
+its expected loss (0.716) is notably lower than manufacturing's (0.841),
+indicating that even with threshold optimization issues, the model makes
+more reliable predictions for service firms.
+
+The stronger performance for services suggests that growth patterns in
+this sector may be more consistently captured by our feature set, or
+that growth dynamics in service industries follow more predictable
+patterns than in manufacturing.
+
+## Comparing Industry-Specific Models
+
+Now let's compare model performance across industries to identify
+differences in fast growth prediction patterns.
+
+```{r industry_comparison}
+# Create performance comparison table
+performance_comparison <- data.frame(
+  Metric = c(
+    "CV RMSE", 
+    "CV AUC", 
+    "Optimal Threshold", 
+    "CV Expected Loss", 
+    "Holdout RMSE", 
+    "Holdout AUC", 
+    "Holdout Expected Loss",
+    "Prevalence (% Fast Growth)",
+    "Accuracy",
+    "Sensitivity/Recall",
+    "Specificity",
+    "Precision"
+  ),
+  Manufacturing = c(
+    CV_RMSE_mfg,
+    CV_AUC_mfg,
+    best_threshold_mfg,
+    expected_loss_mfg,
+    holdout_rmse_mfg,
+    auc_holdout_mfg,
+    expected_loss_holdout_mfg,
+    mean(data_holdout_mfg$fast_growth) * 100,
+    cm_mfg$overall["Accuracy"],
+    cm_mfg$byClass["Sensitivity"],
+    cm_mfg$byClass["Specificity"],
+    cm_mfg$byClass["Pos Pred Value"]
+  ),
+  Services = c(
+    CV_RMSE_srv,
+    CV_AUC_srv,
+    best_threshold_srv,
+    expected_loss_srv,
+    holdout_rmse_srv,
+    auc_holdout_srv,
+    expected_loss_holdout_srv,
+    mean(data_holdout_srv$fast_growth) * 100,
+    cm_srv$overall["Accuracy"],
+    cm_srv$byClass["Sensitivity"],
+    cm_srv$byClass["Specificity"],
+    cm_srv$byClass["Pos Pred Value"]
+  )
+)
+
+# Display formatted table
+kable(performance_comparison,
+      caption = "Model Performance Comparison Between Industries",
+      digits = c(0, 3, 3))
+```
+
+The performance comparison reveals interesting differences between the
+manufacturing and services models. Let's examine the confusion matrices
+to better understand the classification behavior.
+
+```{r confusion_matrices}
+# Display confusion matrices
+cat("Manufacturing Confusion Matrix:\n")
+print(cm_mfg$table)
+cat("\nServices Confusion Matrix:\n")
+print(cm_srv$table)
+
+# Create confusion matrix visualization
+confusion_mfg <- data.frame(
+  Prediction = rep(c("Predicted No Growth", "Predicted Fast Growth"), each = 2),
+  Actual = rep(c("Actual No Growth", "Actual Fast Growth"), 2),
+  Count = c(cm_mfg$table[1,1], cm_mfg$table[1,2], 
+           cm_mfg$table[2,1], cm_mfg$table[2,2]),
+  Industry = "Manufacturing"
+)
+
+confusion_srv <- data.frame(
+  Prediction = rep(c("Predicted No Growth", "Predicted Fast Growth"), each = 2),
+  Actual = rep(c("Actual No Growth", "Actual Fast Growth"), 2),
+  Count = c(cm_srv$table[1,1], cm_srv$table[1,2], 
+           cm_srv$table[2,1], cm_srv$table[2,2]),
+  Industry = "Services"
+)
+
+confusion_combined <- rbind(confusion_mfg, confusion_srv)
+
+# Create confusion matrix visualization
+ggplot(confusion_combined, 
+       aes(x = Actual, y = Prediction, fill = Count)) +
+  geom_tile() +
+  geom_text(aes(label = Count), color = "white", size = 4) +
+  scale_fill_viridis() +
+  facet_wrap(~Industry) +
+  labs(
+    title = "Confusion Matrices by Industry",
+    x = "Actual Class",
+    y = "Predicted Class"
+  ) +
+  theme_bg() +
+  theme(legend.position = "right")
+```
+
+The confusion matrices highlight differences in classification behavior
+between industries. Next, let's compare the ROC curves to visualize
+discrimination ability.
+
+```{r roc_comparison}
+# Compare ROC curves
+# Combine ROC data for plotting
+roc_data_mfg <- data.frame(
+  Specificity = 1 - roc_obj_holdout_mfg$specificities,
+  Sensitivity = roc_obj_holdout_mfg$sensitivities,
+  Industry = "Manufacturing"
+)
+
+roc_data_srv <- data.frame(
+  Specificity = 1 - roc_obj_holdout_srv$specificities,
+  Sensitivity = roc_obj_holdout_srv$sensitivities,
+  Industry = "Services"
+)
+
+roc_combined <- rbind(roc_data_mfg, roc_data_srv)
+
+# Plot combined ROC curves
+ggplot(roc_combined, aes(x = Specificity, y = Sensitivity, color = Industry)) +
+  geom_line(size = 1) +
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "gray") +
+  annotate("text", x = 0.75, y = 0.25, 
+           label = paste0("Manufacturing AUC: ", round(auc_holdout_mfg, 3)), 
+           color = "blue", size = 4) +
+  annotate("text", x = 0.75, y = 0.15, 
+           label = paste0("Services AUC: ", round(auc_holdout_srv, 3)), 
+           color = "red", size = 4) +
+  labs(
+    title = "ROC Curves by Industry",
+    x = "False Positive Rate (1 - Specificity)",
+    y = "True Positive Rate (Sensitivity)"
+  ) +
+  theme_bg() +
+  coord_equal() +
+  theme(legend.position = "bottom")
+```
+
+The ROC curves illustrate differences in discriminative ability between
+the two models. Let's now examine which features are most important for
+predicting fast growth in each industry.
+
+## Feature Importance Comparison
+
+```{r feature_importance}
+# Extract coefficients from logistic models
+coef_mfg <- coef(logit_model_mfg$finalModel)
+coef_srv <- coef(logit_model_srv$finalModel)
+
+# Convert to data frames and clean up names
+coef_mfg_df <- data.frame(
+  Variable = names(coef_mfg),
+  Coefficient = as.numeric(coef_mfg),
+  Industry = "Manufacturing"
+)
+
+coef_srv_df <- data.frame(
+  Variable = names(coef_srv),
+  Coefficient = as.numeric(coef_srv),
+  Industry = "Services"
+)
+
+# Combine
+all_coefs <- rbind(coef_mfg_df, coef_srv_df)
+
+# Find the top 10 most influential variables for each industry
+top_vars_mfg <- coef_mfg_df %>%
+  filter(Variable != "(Intercept)") %>%
+  arrange(desc(abs(Coefficient))) %>%
+  head(10)
+
+top_vars_srv <- coef_srv_df %>%
+  filter(Variable != "(Intercept)") %>%
+  arrange(desc(abs(Coefficient))) %>%
+  head(10)
+
+# Display top variables
+kable(top_vars_mfg, 
+      caption = "Top 10 Influential Variables - Manufacturing",
+      digits = 3)
+
+kable(top_vars_srv, 
+      caption = "Top 10 Influential Variables - Services",
+      digits = 3)
+
+# Find variables that appear in both top 10 lists
+common_top_vars <- intersect(top_vars_mfg$Variable, top_vars_srv$Variable)
+cat("Variables important in both industries:", paste(common_top_vars, collapse = ", "), "\n")
+
+# Compare coefficients for common variables
+if(length(common_top_vars) > 0) {
+  common_coefs <- all_coefs %>%
+    filter(Variable %in% common_top_vars) %>%
+    spread(Industry, Coefficient)
+  
+  kable(common_coefs, 
+        caption = "Comparison of Common Important Variables",
+        digits = 3)
+}
+
+# Visualize differences in top coefficients
+top_vars_combined <- c(top_vars_mfg$Variable, top_vars_srv$Variable) %>% unique()
+
+coef_comparison <- all_coefs %>%
+  filter(Variable %in% top_vars_combined, Variable != "(Intercept)") %>%
+  spread(Industry, Coefficient, fill = 0)
+
+# Calculate absolute magnitude for sorting
+coef_comparison$Magnitude <- (abs(coef_comparison$Manufacturing) + abs(coef_comparison$Services))/2
+
+# Plot top 15 most influential variables by average magnitude
+ggplot(coef_comparison %>% 
+         arrange(desc(Magnitude)) %>% 
+         head(15) %>%
+         gather(key = "Industry", value = "Coefficient", Manufacturing, Services),
+       aes(x = reorder(Variable, Magnitude), y = Coefficient, fill = Industry)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  coord_flip() +
+  labs(
+    title = "Top Predictor Variables by Industry",
+    x = "",
+    y = "Coefficient Value"
+  ) +
+  theme_bg() +
+  theme(legend.position = "bottom")
+```
+
+The coefficient comparison reveals which variables are most important
+for predicting fast growth in each industry, and how their impacts
+differ between sectors.
+
+## Summary of Industry-Specific Analysis
+
+```{r key_findings}
+# Find best and worst performing industry by AUC
+auc_values <- c(auc_holdout_mfg, auc_holdout_srv)
+industry_names <- c("Manufacturing", "Services")
+best_industry <- industry_names[which.max(auc_values)]
+worst_industry <- industry_names[which.min(auc_values)]
+
+# Calculate threshold difference
+threshold_diff <- abs(best_threshold_mfg - best_threshold_srv)
+
+# Check if any thresholds are infinite
+if(any(is.infinite(c(best_threshold_mfg, best_threshold_srv)))) {
+  cat("Note: Some industries have infinite optimal thresholds, indicating the ROC\n")
+  cat("optimization couldn't find a stable threshold that balances sensitivity\n")
+  cat("and specificity for our cost function.\n\n")
+}
+
+# Create a summary data frame for clearer comparison
+summary_df <- data.frame(
+  Industry = industry_names,
+  AUC = round(auc_values, 3),
+  Optimal_Threshold = c(best_threshold_mfg, best_threshold_srv),
+  Expected_Loss = c(expected_loss_holdout_mfg, expected_loss_holdout_srv),
+  stringsAsFactors = FALSE
+)
+
+# Display the summary
+print(summary_df)
+```
+
+## Discussion and Conclusion
+
+Our comprehensive comparison of manufacturing and services sectors
+reveals important insights into the predictive modeling of fast-growing
+firms across different industries.
+
+### Performance Differences
+
+The services model consistently outperforms the manufacturing model
+across all key metrics. With a higher AUC (0.719 vs. 0.694) and lower
+RMSE (0.333 vs. 0.361), the services model demonstrates superior
+discriminative ability and accuracy. This performance gap persists in
+both cross-validation and holdout evaluations, suggesting a fundamental
+difference in how well our feature set captures growth patterns across
+industries.
+
+The lower expected loss for services (0.716 vs. 0.841) further confirms
+this performance advantage, indicating that predictions for service
+firms are more reliable and cost-effective under our defined loss
+function.
+
+### Classification Challenges
+
+Both models exhibit interesting classification behavior as revealed by
+identical sensitivity (1.000) and specificity (0.000) values. This
+extreme classification pattern indicates that both models are
+classifying all observations as "no fast growth." This conservatism is
+reflected in the infinite optimal thresholds, which signal that our ROC
+optimization procedure couldn't identify any decision boundary that
+effectively balances sensitivity and specificity according to our cost
+function (FP=6, FN=5).
+
+Despite this classification challenge, the models still achieve
+reasonable accuracy (83.2% for manufacturing, 85.7% for services) due to
+the imbalanced nature of the dataset, where most firms are indeed not
+fast-growing.
+
+### Industry-Specific Growth Patterns
+
+The consistent performance gap between industries suggests that growth
+dynamics differ substantially between manufacturing and service firms.
+Several factors may explain this:
+
+1.  Manufacturing growth may depend more on capital-intensive
+    investments, technological innovation cycles, or supply chain
+    relationships that are difficult to capture in financial metrics
+    alone.
+
+2.  Service firm growth might follow more predictable patterns related
+    to market expansion, personnel quality, and location
+    advantages---factors that may be better reflected in our feature
+    set.
+
+3.  The slightly higher prevalence of fast-growing firms in
+    manufacturing (16.8% vs. 14.3%) suggests different growth
+    environments, which our one-size-fits-all modeling approach fails to
+    accommodate effectively.
+
+### Business Implications
+
+These findings have important practical implications for organizations
+seeking to identify high-growth firms:
+
+1.  **Industry-Specific Models**: Different screening criteria should be
+    applied when evaluating growth potential across industries. The same
+    model architecture performs differently depending on the sector.
+
+2.  **Classification Strategy**: The classification challenges suggest
+    that using predicted probabilities directly might be more useful
+    than binary classification, especially given the threshold
+    optimization difficulties.
+
+3.  **Risk Assessment**: Predictions for service firms appear more
+    reliable, suggesting higher confidence can be placed in these
+    assessments compared to manufacturing predictions.
+
+4.  **Feature Engineering**: Future models could benefit from
+    incorporating industry-specific indicators that better capture the
+    unique growth drivers in each sector.
+
+### Limitations and Future Directions
+
+Several limitations of this analysis suggest avenues for improvement:
+
+1.  **Alternative Loss Functions**: Different cost functions might yield
+    more stable optimal thresholds, especially if customized to each
+    industry's specific risk-reward profile.
+
+2.  **Feature Selection**: Industry-specific feature selection might
+    improve performance by focusing on the most relevant predictors for
+    each sector.
+
+3.  **Advanced Algorithms**: Non-linear methods like random forests
+    might better capture complex growth patterns, especially in
+    manufacturing.
+
+4.  **Handling Class Imbalance**: Techniques specifically designed for
+    imbalanced data could improve the models' ability to identify the
+    minority class of fast-growing firms.
+
+In conclusion, our analysis demonstrates that predicting fast growth
+requires industry-specific approaches. The performance differences
+between manufacturing and services highlight that growth dynamics vary
+significantly across sectors. While our current approach shows better
+promise for service industries, both sectors would benefit from tailored
+modeling strategies that account for their unique characteristics and
+growth drivers.
