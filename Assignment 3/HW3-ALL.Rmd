@@ -1,0 +1,2135 @@
+---
+title: "DA3 Assignment 3 - Finding Fast Growing Firms 2025"
+author: "Orhan and Lisa"
+date: "`r Sys.Date()`"
+output:
+  pdf_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+```{r setup, include=TRUE, message=FALSE, warning=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,       # Show code
+  results = 'markup', # Show output
+  message = FALSE,    # Don't show messages
+  warning = FALSE,    # Don't show warnings
+  fig.width = 10,     # Figure width
+  fig.height = 6,     # Figure height
+  fig.align = 'center' # Center align figures
+)
+```
+
+# Introduction
+
+This analysis focuses on building and evaluating models to predict
+fast-growing firms using the Bisnode dataset. We'll design a target
+variable for "fast growth", explore feature engineering options, build
+multiple predictive models (including logistic regression and random
+forest), and evaluate their performance through cross-validation and on
+a holdout set.
+
+# Data Preparation
+
+## Initial Setup
+
+```{r initial_setup}
+# Clear environment
+rm(list=ls())
+
+# Set working directories and paths
+# Note: You may need to adjust these paths for your system
+setwd("C:/Users/Orhan Olgen/OneDrive - Central European University (CEU GmbH Hungarian Branch Office)/Desktop/CEU/Machine Learning/Data-Analysis-3/Assignment 3/Data-Analysis-3/Assignment 3")
+data_dir <- "C:/Users/Orhan Olgen/OneDrive - Central European University (CEU GmbH Hungarian Branch Office)/Desktop/CEU/Machine Learning/Data-Analysis-3/Assignment 3/Data-Analysis-3/Assignment 3/Data/"
+output <- "C:/Users/Orhan Olgen/OneDrive - Central European University (CEU GmbH Hungarian Branch Office)/Desktop/CEU/Machine Learning/Data-Analysis-3/Assignment 3/Data-Analysis-3/Assignment 3/Figures/"
+
+# Load helper functions
+source("theme_bg.R")
+source("da_helper_functions.R")
+
+
+# Import libraries
+# Data manipulation and visualization
+library(haven)
+library(purrr)
+library(skimr)
+library(kableExtra)
+library(cowplot)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+
+# Modeling packages
+library(glmnet)      # For regularized regression (LASSO)
+library(margins)     # For marginal effects
+library(gmodels)     # For model utilities
+library(lspline)     # For linear splines
+library(sandwich)    # For robust standard errors
+
+# Machine learning and evaluation
+library(caret)       # For model training and evaluation
+library(pROC)        # For ROC curve analysis
+library(ranger)      # For random forest modeling
+library(rattle)      # For model visualization
+library(rpart)       # For decision trees
+library(partykit)    # For tree visualization
+library(rpart.plot)  # For tree plotting
+library(viridis)     # For color schemes
+```
+
+## Load and Explore Data
+
+```{r load_data}
+# Load the cleaned dataset prepared from the bisnode firms panel
+data <- read_rds(paste0(data_dir, "bisnode_firms_clean.rds"))
+
+# Quick summary of the fast growth target variable
+summary(data$fast_growth_f)
+```
+
+## Variable Selection
+
+We organize our variables into meaningful groups to systematically build
+and compare models with different levels of complexity. This approach
+allows us to assess the value added by different types of predictors.
+
+```{r variable_selection}
+# Raw financial variables
+rawvars <- c(
+  "curr_assets", "curr_liab", "extra_exp", "extra_inc", "extra_profit_loss", 
+  "fixed_assets", "inc_bef_tax", "intang_assets", "inventories", "liq_assets", 
+  "material_exp", "personnel_exp", "profit_loss_year", "sales", "share_eq", 
+  "subscribed_cap", "growth_past"
+)
+
+# Data quality indicators
+qualityvars <- c("balsheet_flag", "balsheet_length", "balsheet_notfullyear")
+
+# Engineered financial ratios and scaled variables
+engvar <- c(
+  "total_assets_bs", "fixed_assets_bs", "liq_assets_bs", "curr_assets_bs",
+  "share_eq_bs", "subscribed_cap_bs", "intang_assets_bs", "extra_exp_pl",
+  "extra_inc_pl", "extra_profit_loss_pl", "inc_bef_tax_pl", "inventories_pl",
+  "material_exp_pl", "profit_loss_year_pl", "personnel_exp_pl"
+)
+
+# Squared terms for non-linear relationships
+engvar2 <- c(
+  "extra_profit_loss_pl_quad", "inc_bef_tax_pl_quad",
+  "profit_loss_year_pl_quad", "share_eq_bs_quad"
+)
+
+# Flags for outliers and special cases
+engvar3 <- c(
+  grep("*flag_low$", names(data), value = TRUE),
+  grep("*flag_high$", names(data), value = TRUE),
+  grep("*flag_error$", names(data), value = TRUE),
+  grep("*flag_zero$", names(data), value = TRUE)
+)
+
+# Short-term growth variables
+d1 <- c(
+  "d1_sales_mil_log_mod", "d1_sales_mil_log_mod_sq",
+  "flag_low_d1_sales_mil_log", "flag_high_d1_sales_mil_log"
+)
+
+# Human resource variables
+hr <- c(
+  "female", "ceo_age", "flag_high_ceo_age", "flag_low_ceo_age",
+  "flag_miss_ceo_age", "ceo_count", "labor_avg_mod",
+  "flag_miss_labor_avg", "foreign_management"
+)
+
+# Firm characteristics
+firm <- c("age", "age2", "new", "ind2_cat", "m_region_loc", "urban_m")
+
+# Interaction terms for logit and LASSO models
+interactions1 <- c(
+  "ind2_cat*age", "ind2_cat*age2",
+  "ind2_cat*d1_sales_mil_log_mod", "ind2_cat*sales_mil_log",
+  "ind2_cat*ceo_age", "ind2_cat*foreign_management",
+  "ind2_cat*female", "ind2_cat*urban_m", "ind2_cat*labor_avg_mod"
+)
+
+interactions2 <- c(
+  "sales_mil_log*age", "sales_mil_log*female",
+  "sales_mil_log*profit_loss_year_pl", "sales_mil_log*foreign_management"
+)
+
+# Define model specifications with incremental complexity
+X1 <- c("sales_mil_log", "sales_mil_log_sq", "d1_sales_mil_log_mod", "profit_loss_year_pl", "ind2_cat")
+X2 <- c("sales_mil_log", "sales_mil_log_sq", "d1_sales_mil_log_mod", "profit_loss_year_pl", 
+        "fixed_assets_bs", "share_eq_bs", "curr_liab_bs", "curr_liab_bs_flag_high", 
+        "curr_liab_bs_flag_error", "age", "foreign_management", "ind2_cat")
+X3 <- c("sales_mil_log", "sales_mil_log_sq", firm, engvar, d1)
+X4 <- c("sales_mil_log", "sales_mil_log_sq", firm, engvar, engvar2, engvar3, d1, hr, qualityvars)
+X5 <- c("sales_mil_log", "sales_mil_log_sq", firm, engvar, engvar2, engvar3, d1, hr, qualityvars, 
+        interactions1, interactions2)
+
+# Variables for LASSO model
+logitvars <- c("sales_mil_log", "sales_mil_log_sq", engvar, engvar2, engvar3, d1, hr, firm, 
+               qualityvars, interactions1, interactions2)
+
+# Variables for Random Forest (prefer original untransformed variables)
+rfvars <- c("sales_mil", "d1_sales_mil_log", rawvars, hr, firm, qualityvars)
+```
+
+## Train-Test Split
+
+We split the data into training (80%) and holdout (20%) sets using
+stratified sampling to maintain the same proportion of fast-growing
+firms in both subsets.
+
+```{r train_test_split}
+# Set seed for reproducibility
+set.seed(13505)
+
+# Create stratified partition based on the fast_growth target
+train_indices <- as.integer(createDataPartition(data$fast_growth, p = 0.8, list = FALSE))
+data_train <- data[train_indices, ]
+data_holdout <- data[-train_indices, ]
+
+# Verify dimensions of each set
+cat("Training set dimensions:", dim(data_train), "\n")
+cat("Holdout set dimensions:", dim(data_holdout), "\n")
+
+# Check distribution of the target variable in each set
+cat("\nTarget distribution in full dataset:\n")
+print(table(data$fast_growth_f) / length(data$fast_growth_f))
+
+cat("\nTarget distribution in training set:\n")
+print(table(data_train$fast_growth_f) / length(data_train$fast_growth_f))
+
+cat("\nTarget distribution in holdout set:\n")
+print(table(data_holdout$fast_growth_f) / length(data_holdout$fast_growth_f))
+```
+
+# Part I: Probability Prediction
+
+In this section, we focus on training models to predict the probability
+of fast growth. We'll evaluate model performance primarily through
+cross-validated RMSE and AUC.
+
+## Cross-Validation Setup
+
+```{r cv_setup}
+# Configure 5-fold cross-validation with probability output
+train_control <- trainControl(
+  method = "cv",              # Cross-validation method
+  number = 5,                 # Number of folds
+  classProbs = TRUE,          # Return class probabilities
+  summaryFunction = twoClassSummaryExtended,  # Extended performance metrics
+  savePredictions = TRUE      # Save predictions for later analysis
+)
+```
+
+## Logistic Regression Models
+
+```{r train_logit_models}
+# Organize model variable sets
+logit_model_vars <- list(
+  "X1" = X1, 
+  "X2" = X2, 
+  "X3" = X3, 
+  "X4" = X4, 
+  "X5" = X5
+)
+
+# Storage for results
+CV_RMSE_folds <- list()
+logit_models <- list()
+
+# Train each logit model variant
+for (model_name in names(logit_model_vars)) {
+  # Extract feature set
+  features <- logit_model_vars[[model_name]]
+  
+  # Build formula and train model
+  set.seed(13505)
+  glm_model <- train(
+    formula(paste0("fast_growth_f ~ ", paste0(features, collapse = " + "))),
+    method = "glm",
+    data = data_train,
+    family = binomial,
+    trControl = train_control
+  )
+  
+  # Store model and performance metrics by fold
+  logit_models[[model_name]] <- glm_model
+  CV_RMSE_folds[[model_name]] <- glm_model$resample[, c("Resample", "RMSE")]
+}
+
+# Print summary of first model to examine
+summary(logit_models[["X1"]])
+```
+
+## LASSO Logistic Regression Model
+
+```{r train_lasso_model}
+# Define lambda grid for LASSO regularization
+lambda <- 10^seq(-1, -4, length = 10)
+grid <- expand.grid("alpha" = 1, lambda = lambda)
+
+# Train LASSO model
+set.seed(13505)
+system.time({
+  logit_lasso_model <- train(
+    formula(paste0("fast_growth_f ~ ", paste0(logitvars, collapse = " + "))),
+    data = data_train,
+    method = "glmnet",
+    preProcess = c("center", "scale"),  # Standardize predictors
+    family = "binomial",
+    trControl = train_control,
+    tuneGrid = grid,
+    na.action = na.exclude
+  )
+})
+
+# Extract the best model and lambda value
+tuned_logit_lasso_model <- logit_lasso_model$finalModel
+best_lambda <- logit_lasso_model$bestTune$lambda
+cat("Best lambda value:", best_lambda, "\n")
+
+# Store model for comparison
+logit_models[["LASSO"]] <- logit_lasso_model
+
+# Extract non-zero coefficients
+lasso_coeffs <- as.matrix(coef(tuned_logit_lasso_model, best_lambda))
+nonzero_coeffs <- lasso_coeffs[lasso_coeffs != 0, , drop = FALSE]
+cat("Number of non-zero coefficients:", nrow(nonzero_coeffs), "\n")
+
+# Save coefficients to file
+write.csv(lasso_coeffs, paste0(output, "lasso_logit_coeffs.csv"))
+
+# Store RMSE by fold
+CV_RMSE_folds[["LASSO"]] <- logit_lasso_model$resample[, c("Resample", "RMSE")]
+```
+
+## Model Evaluation - AUC and RMSE
+
+```{r model_evaluation_cv}
+# Calculate AUC for each model by fold
+CV_AUC_folds <- list()
+
+for (model_name in names(logit_models)) {
+  auc <- list()
+  model <- logit_models[[model_name]]
+  
+  # Calculate AUC for each fold
+  for (fold in c("Fold1", "Fold2", "Fold3", "Fold4", "Fold5")) {
+    cv_fold <- model$pred %>% filter(Resample == fold)
+    roc_obj <- roc(cv_fold$obs, cv_fold$fast_growth)
+    auc[[fold]] <- as.numeric(roc_obj$auc)
+  }
+  
+  # Store AUC values by fold
+  CV_AUC_folds[[model_name]] <- data.frame(
+    "Resample" = names(auc),
+    "AUC" = unlist(auc)
+  )
+}
+
+# Calculate average RMSE and AUC across folds for each model
+CV_RMSE <- list()
+CV_AUC <- list()
+
+for (model_name in names(logit_models)) {
+  CV_RMSE[[model_name]] <- mean(CV_RMSE_folds[[model_name]]$RMSE)
+  CV_AUC[[model_name]] <- mean(CV_AUC_folds[[model_name]]$AUC)
+}
+
+# Count number of predictors in each model
+nvars <- lapply(logit_models, FUN = function(x) length(x$coefnames))
+nvars[["LASSO"]] <- sum(lasso_coeffs != 0)
+
+# Create summary table
+logit_summary <- data.frame(
+  "Number_of_predictors" = unlist(nvars),
+  "CV_RMSE" = unlist(CV_RMSE),
+  "CV_AUC" = unlist(CV_AUC)
+)
+
+# Display and save summary table
+kable(logit_summary, 
+      caption = "Model Performance Comparison",
+      col.names = c("Number of predictors", "CV RMSE", "CV AUC"), 
+      digits = 3)
+
+```
+
+## Holdout Set Evaluation
+
+Based on the cross-validation results, we select the best model (X4) and
+evaluate it on the holdout set.
+
+```{r holdout_evaluation}
+# Select best model from CV results
+best_logit_no_loss <- logit_models[["X4"]]
+
+# Generate predictions on holdout set
+logit_predicted_probabilities_holdout <- predict(best_logit_no_loss, 
+                                                 newdata = data_holdout, 
+                                                 type = "prob")
+
+# Add predictions to holdout data
+data_holdout[, "best_logit_no_loss_pred"] <- logit_predicted_probabilities_holdout[, "fast_growth"]
+
+# Calculate RMSE on holdout set
+holdout_rmse <- RMSE(data_holdout[, "best_logit_no_loss_pred", drop = TRUE], 
+                     data_holdout$fast_growth)
+cat("Holdout set RMSE:", holdout_rmse, "\n")
+```
+
+## ROC Curve Analysis
+
+```{r roc_analysis, fig.width=10, fig.height=6}
+# Generate discrete ROC curve with various thresholds
+thresholds <- seq(0.05, 0.75, by = 0.05)
+
+cm <- list()
+true_positive_rates <- c()
+false_positive_rates <- c()
+
+for (thr in thresholds) {
+  # Generate predictions using current threshold
+  holdout_prediction <- ifelse(data_holdout[, "best_logit_no_loss_pred"] < thr, 
+                               "no_fast_growth", "fast_growth") %>%
+    factor(levels = c("no_fast_growth", "fast_growth"))
+  
+  # Create confusion matrix
+  cm_thr <- confusionMatrix(holdout_prediction, data_holdout$fast_growth_f)$table
+  cm[[as.character(thr)]] <- cm_thr
+  
+  # Calculate TPR and FPR
+  true_positive_rates <- c(true_positive_rates, 
+                           cm_thr["fast_growth", "fast_growth"] /
+                             (cm_thr["fast_growth", "fast_growth"] + 
+                                cm_thr["no_fast_growth", "fast_growth"]))
+  
+  false_positive_rates <- c(false_positive_rates, 
+                            cm_thr["fast_growth", "no_fast_growth"] /
+                              (cm_thr["fast_growth", "no_fast_growth"] + 
+                                 cm_thr["no_fast_growth", "no_fast_growth"]))
+}
+
+# Create dataframe for plotting
+tpr_fpr_for_thresholds <- tibble(
+  "threshold" = thresholds,
+  "true_positive_rate" = true_positive_rates,
+  "false_positive_rate" = false_positive_rates
+)
+
+# Plot discrete ROC curve
+discrete_roc_plot <- ggplot(
+  data = tpr_fpr_for_thresholds,
+  aes(x = false_positive_rate, y = true_positive_rate, color = threshold)
+) +
+  labs(
+    title = "Discrete ROC Curve with Different Thresholds",
+    x = "False positive rate (1 - Specificity)", 
+    y = "True positive rate (Sensitivity)"
+  ) +
+  geom_point(size = 2, alpha = 0.8) +
+  scale_color_viridis(option = "D", direction = -1) +
+  scale_x_continuous(expand = c(0.01, 0.01), limit = c(0, 1), breaks = seq(0, 1, 0.1)) +
+  scale_y_continuous(expand = c(0.01, 0.01), limit = c(0, 1), breaks = seq(0, 1, 0.1)) +
+  theme_bg() +
+  theme(legend.position = "right") +
+  theme(
+    legend.title = element_text(size = 8), 
+    legend.text = element_text(size = 8),
+    legend.key.size = unit(.4, "cm")
+  )
+
+# Display discrete ROC plot
+print(discrete_roc_plot)
+
+```
+
+```{r roc_analysis2, fig.width=10, fig.height=6}
+# Generate continuous ROC curve
+roc_obj_holdout <- roc(data_holdout$fast_growth, data_holdout$best_logit_no_loss_pred)
+auc_value <- round(as.numeric(roc_obj_holdout$auc), 3)
+
+# Create and display continuous ROC plot
+createRocPlot(roc_obj_holdout, "best_logit_no_loss_roc_plot_holdout")
+cat("AUC on holdout set:", auc_value, "\n")
+```
+
+## Confusion Matrix Analysis
+
+```{r confusion_matrix_analysis}
+# Default threshold (0.5)
+logit_class_prediction <- predict(best_logit_no_loss, newdata = data_holdout)
+summary(logit_class_prediction)
+
+# Confusion matrix with default threshold
+cm_object1 <- confusionMatrix(logit_class_prediction, 
+                              data_holdout$fast_growth_f, 
+                              positive = "fast_growth")
+cm1 <- cm_object1$table
+print(cm1)
+cat("\nAccuracy with default threshold (0.5):", round(cm_object1$overall["Accuracy"], 4), "\n")
+cat("Sensitivity (True Positive Rate):", round(cm_object1$byClass["Sensitivity"], 4), "\n")
+cat("Specificity (True Negative Rate):", round(cm_object1$byClass["Specificity"], 4), "\n")
+
+# Alternative threshold: mean of predicted probabilities
+mean_predicted_default_prob <- mean(data_holdout$best_logit_no_loss_pred)
+cat("\nMean predicted probability:", round(mean_predicted_default_prob, 4), "\n")
+
+holdout_prediction <- ifelse(data_holdout$best_logit_no_loss_pred < mean_predicted_default_prob, 
+                             "no_fast_growth", "fast_growth") %>%
+  factor(levels = c("no_fast_growth", "fast_growth"))
+
+cm_object2 <- confusionMatrix(holdout_prediction, data_holdout$fast_growth_f)
+cm2 <- cm_object2$table
+print(cm2)
+cat("\nAccuracy with mean probability threshold:", round(cm_object2$overall["Accuracy"], 4), "\n")
+cat("Sensitivity (True Positive Rate):", round(cm_object2$byClass["Sensitivity"], 4), "\n")
+cat("Specificity (True Negative Rate):", round(cm_object2$byClass["Specificity"], 4), "\n")
+```
+
+## Calibration Analysis
+
+```{r calibration_analysis, fig.width=8, fig.height=6}
+# Create calibration plot to assess probability accuracy
+create_calibration_plot(
+  data_holdout, 
+  file_name = "logit-m4-calibration", 
+  prob_var = "best_logit_no_loss_pred", 
+  actual_var = "fast_growth",
+  n_bins = 10
+)
+```
+
+# Summary of Part I: Probability Prediction
+
+Based on our cross-validation results and holdout set evaluation, we
+found that:
+
+1.  Model X4, with 79 predictors, provides the best balance between
+    complexity and performance with the highest CV AUC (0.710) and
+    second-lowest CV RMSE (0.331).
+
+2.  The model demonstrates good discrimination ability on the holdout
+    set with an AUC of approximately 0.71.
+
+3.  The default classification threshold (0.5) yields high specificity
+    but very low sensitivity, identifying only a small fraction of
+    fast-growing firms.
+
+4.  Using a lower threshold equal to the mean predicted probability
+    (approximately 0.15) substantially improves sensitivity while
+    maintaining reasonable specificity.
+
+5.  The calibration analysis suggests that while the model ranks firms
+    well by probability, it may not perfectly calibrate the absolute
+    probability values, especially in the middle and upper ranges.
+
+This probability model provides a solid foundation for our
+classification task in Part II, where we'll incorporate a
+business-specific loss function to determine the optimal classification
+threshold.
+
+# Part II: Classification
+
+In this section, we move from probability prediction to classification
+by incorporating a business-specific loss function and determining
+optimal classification thresholds.
+
+## Business Context and Loss Function Definition
+
+In the context of identifying fast-growing firms, the business goal is
+often to allocate resources such as credit, investment, or support
+services efficiently. A false positive (FP)---incorrectly classifying a
+non-growing firm as fast-growing---might result in wasted resources,
+missed returns, or poor lending decisions. On the other hand, a false
+negative (FN)---failing to identify a genuinely fast-growing
+firm---means missing out on a valuable opportunity for partnership,
+investment, or support.
+
+From a strategic perspective, the cost of a false positive is likely
+higher than a false negative, since investing in a non-growing firm
+would waste more resources than missing a potential opportunity. We
+therefore define an asymmetric loss function to reflect this trade-off:
+
+```{r define_loss_function}
+# Define asymmetric loss function
+# FP = cost of false positive (wrongly classifying as fast growth)
+# FN = cost of false negative (missing a fast growing firm)
+FP <- 6
+FN <- 5
+
+# Calculate cost ratio for use in ROC analysis
+cost <- FN/FP
+
+# Calculate prevalence (proportion of fast-growing firms in training data)
+prevalence <- sum(data_train$fast_growth)/length(data_train$fast_growth)
+cat("Prevalence of fast-growing firms:", round(prevalence, 4), "\n")
+cat("Cost ratio (FN/FP):", cost, "\n")
+```
+
+This 6:5 ratio reflects our assessment that wrongly allocating resources
+to a non-growing firm is moderately more damaging than missing a growth
+opportunity. By minimizing expected loss using this loss function, we
+choose a threshold that is not just statistically optimal but also
+aligned with real-world business priorities.
+
+## Finding Optimal Thresholds for Logistic Models
+
+For each model, we'll find the threshold that minimizes the expected
+loss across all cross-validation folds:
+
+```{r optimal_thresholds_logit}
+# Storage for results
+best_thresholds <- list()
+expected_loss <- list()
+logit_cv_rocs <- list()
+logit_cv_threshold <- list()
+logit_cv_expected_loss <- list()
+
+# For each model
+for (model_name in names(logit_models)) {
+  model <- logit_models[[model_name]]
+  best_thresholds_cv <- list()
+  expected_loss_cv <- list()
+  
+  # For each fold
+  for (fold in c("Fold1", "Fold2", "Fold3", "Fold4", "Fold5")) {
+    # Get predictions for this fold
+    cv_fold <- model$pred %>% filter(Resample == fold)
+    
+    # Compute ROC curve
+    roc_obj <- roc(cv_fold$obs, cv_fold$fast_growth)
+    
+    # Find optimal threshold using cost-weighted Youden index
+    best_threshold <- coords(
+      roc_obj, 
+      "best", 
+      ret = "all", 
+      transpose = FALSE,
+      best.method = "youden", 
+      best.weights = c(cost, prevalence)
+    )
+    
+    # Store threshold and expected loss for this fold
+    best_thresholds_cv[[fold]] <- best_threshold$threshold
+    expected_loss_cv[[fold]] <- (best_threshold$fp*FP + best_threshold$fn*FN)/length(cv_fold$fast_growth)
+  }
+  
+  # Calculate averages across folds
+  best_thresholds[[model_name]] <- mean(unlist(best_thresholds_cv))
+  expected_loss[[model_name]] <- mean(unlist(expected_loss_cv))
+  
+  # Store results from fold 5 for visualization
+  logit_cv_rocs[[model_name]] <- roc_obj
+  logit_cv_threshold[[model_name]] <- best_threshold
+  logit_cv_expected_loss[[model_name]] <- expected_loss_cv[[fold]]
+}
+
+# Create summary table
+logit_summary2 <- data.frame(
+  "Avg_optimal_threshold" = unlist(best_thresholds),
+  "Threshold_fold5" = sapply(logit_cv_threshold, function(x) {x$threshold}), 
+  "Avg_expected_loss" = unlist(expected_loss), 
+  "Expected_loss_fold5" = unlist(logit_cv_expected_loss)
+)
+
+# Display summary table
+kable(logit_summary2, 
+      caption = "Optimal Thresholds and Expected Loss by Model",
+      col.names = c("Avg of optimal thresholds", 
+                   "Threshold for fold #5",
+                   "Avg expected loss", 
+                   "Expected loss for fold #5"),
+      digits = 3)
+
+```
+
+## Visualizing Model Performance and Optimal Thresholds
+
+For each model, we'll create two plots: 1. A loss curve showing how
+expected loss varies with different thresholds 2. An ROC curve
+highlighting the optimal threshold based on our loss function
+
+```{r model_visualization, fig.height=4, fig.width=10}
+# Create plots for each model based on Fold5 results
+for (model_name in names(logit_cv_rocs)) {
+  r <- logit_cv_rocs[[model_name]]
+  best_coords <- logit_cv_threshold[[model_name]]
+  
+  # Create loss plot
+  loss_plot <- createLossPlot(
+    r, 
+    best_coords,
+    paste0(model_name, "_loss_plot")
+  )
+  
+  # Create ROC plot with optimal threshold marked
+  roc_plot <- createRocPlotWithOptimal(
+    r, 
+    best_coords,
+    paste0(model_name, "_roc_plot")
+  )
+  
+  # Display plots
+  print(loss_plot)
+  print(roc_plot)
+}
+```
+
+Based on the expected loss results, models X4 and X5 achieve the lowest
+average expected losses (0.718 and 0.717 respectively), suggesting they
+are the best-performing models under our defined cost structure. The
+LASSO model performs slightly worse (0.727).
+
+Most models return meaningful average thresholds between 0.47 and 0.60,
+indicating that a threshold higher than the default 0.5 would reduce
+expected misclassification costs. However, models X1 and X3 return
+extremely high or infinite thresholds for some folds, suggesting
+instability in their ROC curves or poor separation between classes.
+
+Model X4 offers the most balanced and consistent performance, with a
+clearly defined optimal threshold (0.60) and the lowest fold-specific
+expected loss (0.715).
+
+## Evaluating the Best Model on Holdout Data
+
+We'll select model X4 as our best model based on its strong performance
+and evaluate it on the holdout set:
+
+```{r best_logit_evaluation}
+# Select best model based on average expected loss
+best_logit_with_loss <- logit_models[["X4"]]
+best_logit_optimal_threshold <- best_thresholds[["X4"]]
+
+# Generate predictions on holdout set
+logit_predicted_probabilities_holdout <- predict(
+  best_logit_with_loss, 
+  newdata = data_holdout, 
+  type = "prob"
+)
+
+# Save predictions to holdout data
+data_holdout[,"best_logit_with_loss_pred"] <- logit_predicted_probabilities_holdout[,"fast_growth"]
+
+# Compute ROC curve on holdout set
+roc_obj_holdout <- roc(
+  data_holdout$fast_growth, 
+  data_holdout[, "best_logit_with_loss_pred", drop=TRUE]
+)
+
+# Calculate expected loss on holdout using optimal threshold from CV
+holdout_threshold <- coords(
+  roc_obj_holdout, 
+  x = best_logit_optimal_threshold, 
+  input = "threshold",
+  ret = "all", 
+  transpose = FALSE
+)
+
+expected_loss_holdout <- (holdout_threshold$fp*FP + holdout_threshold$fn*FN)/length(data_holdout$fast_growth)
+cat("Expected loss on holdout set:", round(expected_loss_holdout, 4), "\n")
+
+# Create confusion matrix using optimal threshold
+holdout_prediction <- ifelse(
+  data_holdout$best_logit_with_loss_pred < best_logit_optimal_threshold, 
+  "no_fast_growth", 
+  "fast_growth"
+) %>% factor(levels = c("no_fast_growth", "fast_growth"))
+
+cm_object3 <- confusionMatrix(holdout_prediction, data_holdout$fast_growth_f)
+cm3 <- cm_object3$table
+
+# Display confusion matrix with additional metrics
+kable(cm3, caption = "Confusion Matrix for Best Logistic Model (X4) on Holdout Set")
+cat("\nAccuracy:", round(cm_object3$overall["Accuracy"], 4), "\n")
+cat("Sensitivity (True Positive Rate):", round(cm_object3$byClass["Sensitivity"], 4), "\n")
+cat("Specificity (True Negative Rate):", round(cm_object3$byClass["Specificity"], 4), "\n")
+```
+
+The confusion matrix shows the performance of our best logistic model
+(X4) on the holdout set using the optimal threshold determined from our
+asymmetric loss function. This model and threshold provide a good
+balance between identifying fast-growing firms while minimizing costly
+false positives.
+
+## Random Forest Models
+
+Next, we'll implement two types of random forest models to compare with
+our logistic regression approach:
+
+1.  Probability forest - Estimates the probability of fast growth
+2.  Classification forest - Directly predicts the binary outcome
+
+### Probability Random Forest
+
+```{r rf_probability, results='hide', warning=FALSE, message=FALSE}
+# Define variables for random forest
+rawvars <- c(
+  "curr_assets", "curr_liab", "extra_exp", "extra_inc", "extra_profit_loss", "fixed_assets",
+  "inc_bef_tax", "intang_assets", "inventories", "liq_assets", "material_exp", "personnel_exp",
+  "profit_loss_year", "sales", "share_eq", "subscribed_cap"
+)
+rfvars <- c("sales_mil", "d1_sales_mil_log", rawvars, firm)
+
+# Setup 5-fold cross-validation
+train_control <- trainControl(
+  method = "cv",
+  n = 5,
+  classProbs = TRUE,  # Same as probability = TRUE in ranger
+  summaryFunction = twoClassSummaryExtended,
+  savePredictions = TRUE,
+  verboseIter = TRUE
+)
+
+# Define hyperparameter tuning grid
+tune_grid <- expand.grid(
+  .mtry = c(5, 6, 7),          # Number of variables to consider at each split
+  .splitrule = "gini",         # Split rule
+  .min.node.size = c(10, 15)   # Minimum node size
+)
+
+# Train probability random forest
+set.seed(13505)
+rf_model_p <- train(
+  formula(paste0("fast_growth_f ~ ", paste0(rfvars, collapse = " + "))),
+  method = "ranger",
+  data = data_train,
+  tuneGrid = tune_grid,
+  trControl = train_control
+)
+```
+
+```{r rf_probability_eval5, warning=FALSE, message=FALSE}
+# Display tuning results
+kable(rf_model_p$results, caption = "Random Forest Hyperparameter Tuning Results")
+
+# Extract best hyperparameters
+best_mtry <- rf_model_p$bestTune$mtry
+best_min_node_size <- rf_model_p$bestTune$min.node.size
+cat("Best mtry:", best_mtry, "\n")
+cat("Best min.node.size:", best_min_node_size, "\n")
+
+# Calculate cross-validated RMSE and AUC
+CV_RMSE_folds[["rf_p"]] <- rf_model_p$resample[, c("Resample", "RMSE")]
+
+# Calculate AUC for each fold
+auc <- list()
+for (fold in c("Fold1", "Fold2", "Fold3", "Fold4", "Fold5")) {
+  cv_fold <- rf_model_p$pred %>% filter(Resample == fold)
+  roc_obj <- roc(cv_fold$obs, cv_fold$fast_growth)
+  auc[[fold]] <- as.numeric(roc_obj$auc)
+}
+CV_AUC_folds[["rf_p"]] <- data.frame(
+  "Resample" = names(auc),
+  "AUC" = unlist(auc)
+)
+
+# Average metrics across folds
+CV_RMSE[["rf_p"]] <- mean(CV_RMSE_folds[["rf_p"]]$RMSE)
+CV_AUC[["rf_p"]] <- mean(CV_AUC_folds[["rf_p"]]$AUC)
+
+# Find optimal thresholds and expected loss for each fold
+best_thresholds_cv <- list()
+expected_loss_cv <- list()
+
+for (fold in c("Fold1", "Fold2", "Fold3", "Fold4", "Fold5")) {
+  cv_fold <- rf_model_p$pred %>%
+    filter(
+      mtry == best_mtry,
+      min.node.size == best_min_node_size,
+      Resample == fold
+    )
+  
+  roc_obj <- roc(cv_fold$obs, cv_fold$fast_growth)
+  best_threshold <- coords(
+    roc_obj, 
+    "best", 
+    ret = "all", 
+    transpose = FALSE,
+    best.method = "youden", 
+    best.weights = c(cost, prevalence)
+  )
+  
+  best_thresholds_cv[[fold]] <- best_threshold$threshold
+  expected_loss_cv[[fold]] <- (best_threshold$fp*FP + best_threshold$fn*FN)/length(cv_fold$fast_growth)
+}
+
+# Calculate averages
+best_thresholds[["rf_p"]] <- mean(unlist(best_thresholds_cv))
+expected_loss[["rf_p"]] <- mean(unlist(expected_loss_cv))
+
+# Create summary table for RF probability model
+rf_summary <- data.frame(
+  "CV_RMSE" = CV_RMSE[["rf_p"]],
+  "CV_AUC" = CV_AUC[["rf_p"]],
+  "Avg_optimal_thresholds" = best_thresholds[["rf_p"]],
+  "Threshold_fold5" = best_threshold$threshold,
+  "Avg_expected_loss" = expected_loss[["rf_p"]],
+  "Expected_loss_fold5" = expected_loss_cv[[fold]]
+)
+
+# Display summary
+kable(rf_summary, 
+      caption = "Random Forest Probability Model Performance",
+      col.names = c("CV RMSE", "CV AUC",
+                   "Avg of optimal thresholds", "Threshold for fold #5",
+                   "Avg expected loss", "Expected loss for fold #5"),
+      digits = 3)
+```
+
+```{r rf_probability_eval2, warning=FALSE, message=FALSE}
+
+# Create visualization plots for fold 5
+createLossPlot(roc_obj, best_threshold, "rf_p_loss_plot")
+```
+
+```{r rf_probability_eval3, warning=FALSE, message=FALSE}
+createRocPlotWithOptimal(roc_obj, best_threshold, "rf_p_roc_plot")
+```
+
+```{r rf_probability_eval4, warning=FALSE, message=FALSE}
+# Evaluate on holdout set
+rf_predicted_probabilities_holdout <- predict(rf_model_p, newdata = data_holdout, type = "prob")
+data_holdout$rf_p_prediction <- rf_predicted_probabilities_holdout[, "fast_growth"]
+
+# Calculate RMSE on holdout
+holdout_rmse <- RMSE(data_holdout$rf_p_prediction, data_holdout$fast_growth)
+cat("RMSE on holdout set:", round(holdout_rmse, 4), "\n")
+
+# Calculate ROC and AUC on holdout
+roc_obj_holdout <- roc(data_holdout$fast_growth, data_holdout[, "rf_p_prediction", drop = TRUE])
+auc_holdout <- as.numeric(roc_obj_holdout$auc)
+cat("AUC on holdout set:", round(auc_holdout, 4), "\n")
+
+# Calculate expected loss on holdout
+holdout_threshold <- coords(
+  roc_obj_holdout, 
+  x = best_thresholds[["rf_p"]], 
+  input = "threshold",
+  ret = "all", 
+  transpose = FALSE
+)
+expected_loss_holdout <- (holdout_threshold$fp*FP + holdout_threshold$fn*FN)/length(data_holdout$fast_growth)
+cat("Expected loss on holdout set:", round(expected_loss_holdout, 4), "\n")
+```
+
+The random forest probability model was tuned using 5-fold
+cross-validation across combinations of `mtry` (number of variables
+randomly sampled at each split) and `min.node.size` (minimum size of
+terminal nodes). The best-performing configuration was `mtry = 6` and
+`min.node.size = 10`.
+
+Key metrics for the probability random forest: - Cross-validated RMSE:
+0.341 - Cross-validated AUC: 0.701 - Optimal threshold (minimizing
+expected loss): 0.71 - Average expected loss: 0.735
+
+On the holdout set, the model achieved an RMSE of 0.341, an AUC of
+0.735, and an expected loss of 0.735, indicating good generalization
+performance.
+
+### Classification Random Forest
+
+```{r rf_classification, results='hide', warning=FALSE, message=FALSE}
+# Setup 5-fold cross-validation for classification
+train_control <- trainControl(
+  method = "cv",
+  n = 5,
+  verboseIter = TRUE
+)
+
+# Train classification random forest
+set.seed(13505)
+rf_model_f <- train(
+  formula(paste0("fast_growth_f ~ ", paste0(rfvars, collapse = " + "))),
+  method = "ranger",
+  data = data_train,
+  tuneGrid = tune_grid,
+  trControl = train_control
+)
+```
+
+```{r rf_classification_eval, warning=FALSE, message=FALSE}
+# Make predictions on training and holdout sets
+data_train$rf_f_prediction_class <- predict(rf_model_f, type = "raw")
+data_holdout$rf_f_prediction_class <- predict(rf_model_f, newdata = data_holdout, type = "raw")
+
+# Calculate expected loss on holdout set using our loss function
+fp <- sum(data_holdout$rf_f_prediction_class == "fast_growth" & data_holdout$fast_growth_f == "no_fast_growth")
+fn <- sum(data_holdout$rf_f_prediction_class == "no_fast_growth" & data_holdout$fast_growth_f == "fast_growth")
+expected_loss_rf_f <- (fp*FP + fn*FN)/length(data_holdout$fast_growth)
+cat("Expected loss for classification random forest:", round(expected_loss_rf_f, 4), "\n")
+cat("False positives:", fp, "\n")
+cat("False negatives:", fn, "\n")
+
+# Create confusion matrix using optimal threshold from probability RF
+holdout_prediction_rf <- ifelse(
+  data_holdout$rf_p_prediction < holdout_threshold$threshold, 
+  "no_fast_growth", 
+  "fast_growth"
+) %>% factor(levels = c("no_fast_growth", "fast_growth"))
+
+cm_object4 <- confusionMatrix(holdout_prediction_rf, data_holdout$fast_growth_f)
+cm4 <- cm_object4$table
+
+# Display confusion matrix
+kable(cm4, caption = "Confusion Matrix for Random Forest on Holdout Set")
+cat("\nAccuracy:", round(cm_object4$overall["Accuracy"], 4), "\n")
+cat("Sensitivity (True Positive Rate):", round(cm_object4$byClass["Sensitivity"], 4), "\n")
+cat("Specificity (True Negative Rate):", round(cm_object4$byClass["Specificity"], 4), "\n")
+```
+
+The classification random forest model directly predicts class labels
+rather than probabilities. On the holdout set, it achieved an expected
+loss of 0.732.
+
+The confusion matrix reveals that the model: - Correctly identified
+3,226 true negatives (non-fast-growing firms) - Correctly identified 24
+true positives (fast-growing firms) - Missed 545 fast-growing firms
+(false negatives) - Incorrectly flagged only 12 non-fast-growing firms
+(false positives)
+
+This suggests the classification model is highly conservative, favoring
+precision over recall. It struggles to capture the minority class of
+fast-growing firms, likely due to the class imbalance in the training
+data.
+
+## Model Comparison and Selection
+
+Let's compare the performance of our best models:
+
+```{r model_comparison}
+# Create comparison table of expected loss
+model_comparison <- data.frame(
+  "Model" = c("Logistic Regression (X4)", "Random Forest (Probability)", "Random Forest (Classification)"),
+  "CV_AUC" = c(CV_AUC[["X4"]], CV_AUC[["rf_p"]], NA),
+  "Holdout_AUC" = c(as.numeric(roc_obj_holdout$auc), auc_holdout, NA),
+  "Expected_Loss" = c(expected_loss_holdout, expected_loss_holdout, expected_loss_rf_f)
+)
+
+kable(model_comparison, 
+      caption = "Model Comparison",
+      col.names = c("Model", "CV AUC", "Holdout AUC", "Expected Loss"),
+      digits = 3)
+```
+
+Based on our comprehensive evaluation, we can conclude:
+
+1.  The logistic regression model X4 and the probability random forest
+    model perform similarly in terms of AUC and expected loss.
+
+2.  Both models significantly outperform the default classification
+    approach of using a threshold of 0.5, demonstrating the value of
+    optimizing thresholds based on business-specific costs.
+
+3.  The random forest classification model is too conservative in
+    identifying fast-growing firms, producing very few false positives
+    but missing many true positives.
+
+4.  For operational use, we recommend using the logistic regression
+    model X4 with the optimal threshold of approximately 0.60, as it:
+
+    -   Provides good interpretability while maintaining competitive
+        performance
+    -   Strikes a reasonable balance between identifying fast-growing
+        firms and avoiding false positives
+    -   Generalizes well to unseen data
+    -   Is computationally less expensive than random forest
+
+In a business context where identifying fast-growing firms guides
+resource allocation decisions, this model can serve as a valuable
+screening tool, though human judgment should still be applied to final
+decisions.
+
+# Part III: Discussion of Results
+
+In this final section, we compare and interpret the performance of our
+models for predicting fast-growing firms, evaluate their practical
+utility, and discuss limitations.
+
+## Model Comparison
+
+We'll compare the most promising models from our analysis: the baseline
+logistic regression (X1), our best logistic model (X4), the LASSO
+regularized model, and the random forest probability model.
+
+```{r model_comparison_summary, warning=FALSE, message=FALSE}
+# Count variables in random forest model
+nvars[["rf_p"]] <- length(rfvars)
+
+# Create comprehensive summary table
+summary_results <- data.frame(
+  "Number_of_predictors" = unlist(nvars),
+  "CV_RMSE" = unlist(CV_RMSE),
+  "CV_AUC" = unlist(CV_AUC),
+  "CV_threshold" = unlist(best_thresholds),
+  "CV_expected_Loss" = unlist(expected_loss)
+)
+
+# Filter for models of interest and set display names
+model_names <- c("Logit X1", "Logit X4", "Logit LASSO", "RF probability")
+summary_results <- summary_results %>%
+  filter(rownames(.) %in% c("X1", "X4", "LASSO", "rf_p"))
+rownames(summary_results) <- model_names
+
+# Display the table
+print(summary_results)
+
+# Display formatted table with kable
+kable(summary_results,
+      caption = "Performance Comparison Across Models",
+      col.names = c("Number of predictors", "CV RMSE", "CV AUC", 
+                   "Optimal threshold", "Expected loss"),
+      digits = 3)
+
+```
+
+## Performance Analysis
+
+The comparison reveals several key insights:
+
+1.  **Random Forest vs. Logistic Models**: The random forest probability
+    model achieves the highest AUC (0.712) and one of the lowest
+    expected losses (0.711), demonstrating superior discrimination
+    ability compared to the baseline logistic model (X1) and the LASSO
+    model. This validates the effectiveness of tree-based methods for
+    capturing complex patterns in firm growth.
+
+2.  **Model X4's Efficiency**: The expanded logistic model X4 performs
+    remarkably well with an AUC of 0.710 and the lowest expected loss
+    (0.718) among logistic models. Despite having 79 predictors compared
+    to the random forest's 44, it maintains competitive performance,
+    suggesting a good balance of complexity and accuracy.
+
+3.  **Diminishing Returns with Complexity**: Interestingly, the LASSO
+    model, which includes the most predictors (103), doesn't show clear
+    advantages over X4 or the random forest in terms of AUC or expected
+    loss. This highlights that model complexity alone doesn't guarantee
+    better performance, and careful feature selection is crucial.
+
+4.  **Baseline Model Limitations**: The baseline X1 model, with only 11
+    predictors, consistently underperforms across all metrics,
+    confirming that a richer feature set improves prediction accuracy
+    for this task.
+
+5.  **Optimal Thresholds**: All models benefit from threshold
+    optimization based on our asymmetric loss function. The optimal
+    thresholds range from 0.598 to 0.712, significantly higher than the
+    default 0.5, reflecting our business preference to minimize false
+    positives.
+
+## Confusion Matrix Analysis
+
+To better understand real-world implications, let's examine the
+confusion matrix from our best model (X4) using its optimal threshold:
+
+```{r confusion_analysis, warning=FALSE, message=FALSE}
+# Recreate confusion matrix with X4 model using optimal threshold
+best_logit_predicted_probs <- data_holdout$best_logit_with_loss_pred
+best_threshold_value <- best_thresholds[["X4"]]
+
+# Generate predictions using optimal threshold
+best_model_predictions <- ifelse(
+  best_logit_predicted_probs < best_threshold_value, 
+  "no_fast_growth", 
+  "fast_growth"
+) %>% factor(levels = c("no_fast_growth", "fast_growth"))
+
+# Create confusion matrix
+cm_final <- confusionMatrix(best_model_predictions, data_holdout$fast_growth_f)
+
+# Display confusion matrix with key metrics
+kable(cm_final$table, caption = "Confusion Matrix for Best Model (X4) with Optimal Threshold")
+
+# Calculate and display additional metrics
+true_positives <- cm_final$table[2, 2]
+false_positives <- cm_final$table[2, 1]
+true_negatives <- cm_final$table[1, 1]
+false_negatives <- cm_final$table[1, 2]
+total <- sum(cm_final$table)
+
+precision <- true_positives / (true_positives + false_positives)
+recall <- true_positives / (true_positives + false_negatives)
+f1_score <- 2 * precision * recall / (precision + recall)
+
+metrics_df <- data.frame(
+  Metric = c("Accuracy", "Precision", "Recall/Sensitivity", "Specificity", "F1 Score"),
+  Value = c(
+    cm_final$overall["Accuracy"],
+    precision,
+    recall,
+    cm_final$byClass["Specificity"],
+    f1_score
+  )
+)
+
+kable(metrics_df, digits = 3)
+
+# Calculate business impact
+total_cost <- (false_positives * FP + false_negatives * FN)
+average_cost_per_firm <- total_cost / total
+total_firms_classified_as_growing <- true_positives + false_positives
+true_positive_rate <- true_positives / (true_positives + false_negatives)
+
+cat("\nBusiness Impact Metrics:\n")
+cat("Total misclassification cost:", total_cost, "\n")
+cat("Average cost per firm:", round(average_cost_per_firm, 3), "\n")
+cat("Proportion of firms classified as fast-growing:", 
+    round(total_firms_classified_as_growing / total, 3), "\n")
+cat("Proportion of actual fast-growing firms identified:", 
+    round(true_positive_rate, 3), "\n")
+```
+
+## Practical Utility and Limitations
+
+Despite achieving reasonable predictive performance, our models have
+important limitations that should be considered:
+
+1.  **Inherent Prediction Challenges**: Predicting fast growth remains
+    difficult because:
+
+    -   Fast-growing firms are rare (only \~15% of the sample)
+    -   Growth patterns are inherently noisy and influenced by factors
+        beyond observable financial metrics
+    -   External economic conditions can drastically change growth
+        trajectories
+
+2.  **Model Reliability**: While our models perform better than random
+    guessing (AUC > 0.7), they are far from perfect predictors. For
+    every 100 firms our best model flags as fast-growing:
+
+    -   Only about 30-40 will actually experience fast growth
+    -   We still miss approximately 60-70% of genuinely fast-growing
+        firms
+
+3.  **Practical Applications**: These models are most appropriate for:
+
+    -   Initial screening to narrow down a pool of candidate firms for
+        investment
+    -   Prioritizing firms for deeper analysis by investment
+        professionals
+    -   Complementing (not replacing) expert judgment in credit or
+        investment decisions
+
+4.  **Recommended Use Case**: Given the asymmetric costs of different
+    error types, we recommend using these models as decision support
+    tools rather than automated decision-makers. For example:
+
+    -   A venture capital firm could use the model to filter through
+        thousands of potential investments
+    -   A bank could prioritize loan applications from firms with higher
+        predicted growth probabilities
+    -   A business development agency could identify promising firms for
+        targeted support programs
+
+## Future Improvements
+
+Several approaches could potentially enhance model performance:
+
+1.  **Additional Features**: Incorporating market sentiment data,
+    management team characteristics, or proprietary data on technology
+    adoption might improve predictions.
+
+2.  **Alternative Modeling Approaches**: Ensemble methods combining
+    multiple model types or deep learning approaches might capture more
+    complex patterns.
+
+3.  **Dynamic Modeling**: Considering time-varying effects more
+    explicitly, perhaps through recurrent neural networks or other
+    time-series methods.
+
+4.  **Different Target Definitions**: Exploring alternative definitions
+    of "fast growth" that might be more predictable or
+    business-relevant.
+
+## Conclusion
+
+Our analysis demonstrates that machine learning models can provide
+valuable insights for identifying potentially fast-growing firms, but
+with important caveats. The random forest and logistic regression models
+(particularly X4) perform similarly well, with the choice between them
+depending on whether interpretability or maximum predictive power is
+prioritized.
+
+These models offer a significant improvement over both random selection
+and simpler approaches, but they remain imperfect predictors in an
+inherently challenging domain. Their greatest value comes in
+complementing human expertise by efficiently filtering large numbers of
+firms to identify those worthy of closer examination.
+
+In practical deployment, these models should be regularly monitored and
+retrained as economic conditions change and new data becomes available.
+Used thoughtfully, they can serve as valuable decision support tools,
+but should never fully replace human judgment in high-stakes financial
+or investment decisions.
+
+---
+title: "DA3 Assignment 3 - Task 2: Industry Comparison Analysis"
+author: "Student Name"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    theme: flatly
+    highlight: tango
+    toc: true
+    toc_float: true
+    code_folding: show
+---
+
+# Task 2: Industry Comparison Analysis
+
+In this section, we extend our analysis by examining how our model
+performs across different industry categories. The Bisnode dataset
+contains two main industry groups: manufacturing and services (which
+includes repair, accommodation, and food services). We'll investigate
+whether:
+
+1.  The predictors of fast growth differ between manufacturing and
+    service firms
+2.  The same model achieves different performance levels across these
+    industries
+3.  Optimal classification thresholds vary by industry
+
+## Data Preparation and Industry Analysis
+
+First, we'll load the previously cleaned dataset and examine the
+industry distribution.
+
+```{r load_libraries_and_data}
+# Clear environment
+rm(list = ls())
+
+# Set working directories and paths
+# Note: You may need to adjust these paths for your system
+setwd("C:/Users/Orhan Olgen/OneDrive - Central European University (CEU GmbH Hungarian Branch Office)/Desktop/CEU/Machine Learning/Data-Analysis-3/Assignment 3/Data-Analysis-3/Assignment 3")
+data_dir <- "C:/Users/Orhan Olgen/OneDrive - Central European University (CEU GmbH Hungarian Branch Office)/Desktop/CEU/Machine Learning/Data-Analysis-3/Assignment 3/Data-Analysis-3/Assignment 3/Data/"
+output <- "C:/Users/Orhan Olgen/OneDrive - Central European University (CEU GmbH Hungarian Branch Office)/Desktop/CEU/Machine Learning/Data-Analysis-3/Assignment 3/Data-Analysis-3/Assignment 3/Figures/"
+
+
+# Load helper functions
+source("theme_bg.R")
+source("da_helper_functions.R")
+
+
+# Load the cleaned dataset
+data <- read_rds(paste0(data_dir, "bisnode_firms_clean.rds"))
+
+# Examine industry categories
+table(data$ind)
+```
+
+Let's create our two broad industry categories: manufacturing (combining
+ind = 1, 2) and services (ind = 3).
+
+```{r create_industry_categories}
+# Create broader industry categories
+data <- data %>% 
+  mutate(industry_category = case_when(
+    ind %in% c(1, 2) ~ "manufacturing",  # Merge Auto (1) and Equipment (2) manufacturing
+    ind == 3 ~ "services",               # Hotels and restaurants (3)
+    TRUE ~ "other"
+  ))
+
+# Verify the new industry categories
+industry_table <- table(data$industry_category, data$ind)
+print(industry_table)
+
+# Calculate percentages by industry
+industry_split_pct <- prop.table(table(data$industry_category)) * 100
+cat("Dataset composition:\n")
+cat("Manufacturing: ", round(industry_split_pct["manufacturing"], 1), "%\n", sep="")
+cat("Services: ", round(industry_split_pct["services"], 1), "%\n", sep="")
+```
+
+The table shows how we've combined industries: categories 1 and 2 are
+merged into "manufacturing" while category 3 becomes "services". Let's
+explore the prevalence of fast-growing firms across these broader
+industry categories.
+
+```{r industry_exploration}
+# Calculate fast growth prevalence by industry
+industry_growth_rates <- data %>%
+  group_by(industry_category) %>%
+  summarize(
+    total_firms = n(),
+    fast_growing_firms = sum(fast_growth),
+    growth_rate = mean(fast_growth) * 100
+  )
+
+# Display results
+kable(industry_growth_rates, 
+      caption = "Fast Growth Prevalence by Industry",
+      col.names = c("Industry Category", "Total Firms", "Fast Growing Firms", "Growth Rate (%)"),
+      digits = c(0, 0, 0, 1))
+
+# Create visualization of growth rates by industry
+ggplot(industry_growth_rates, aes(x = industry_category, y = growth_rate, fill = industry_category)) +
+  geom_bar(stat = "identity") +
+  geom_text(aes(label = paste0(round(growth_rate, 1), "%")), 
+            vjust = -0.5, size = 4) +
+  labs(
+    title = "Prevalence of Fast-Growing Firms by Industry",
+    x = "Industry Category",
+    y = "Percentage of Fast-Growing Firms",
+    fill = "Industry"
+  ) +
+  theme_bg() +
+  theme(legend.position = "none")
+
+# Compare key financial metrics between industries
+financial_comparison <- data %>%
+  group_by(industry_category) %>%
+  summarize(
+    avg_sales = mean(sales_mil, na.rm = TRUE),
+    avg_profit_margin = mean(profit_loss_year_pl, na.rm = TRUE),
+    avg_assets = mean(total_assets_bs, na.rm = TRUE),
+    avg_age = mean(age, na.rm = TRUE)
+  )
+
+kable(financial_comparison,
+      caption = "Comparison of Key Metrics by Industry",
+      col.names = c("Industry", "Avg Sales (million)", "Avg Profit Margin", 
+                    "Avg Assets (scaled)", "Avg Age (years)"),
+      digits = 2)
+```
+
+The data reveals interesting differences between sectors. Manufacturing
+appears to have a higher prevalence of fast-growing firms compared to
+services. Additionally, manufacturing firms tend to have higher average
+sales and assets, which aligns with the capital-intensive nature of this
+sector.
+
+## Creating Industry-Specific Datasets
+
+Now we'll split each industry's data into training and holdout sets.
+
+```{r create_industry_datasets}
+# Split data by industry
+data_manufacturing <- data %>% filter(industry_category == "manufacturing")
+data_services <- data %>% filter(industry_category == "services")
+
+# Verify dimensions
+cat("Full dataset dimensions:", dim(data), "\n")
+cat("Manufacturing dataset dimensions:", dim(data_manufacturing), "\n")
+cat("Services dataset dimensions:", dim(data_services), "\n")
+
+# Create training and holdout sets for each industry
+set.seed(13505)
+
+# Manufacturing
+train_indices_mfg <- as.integer(createDataPartition(data_manufacturing$fast_growth, p = 0.8, list = FALSE))
+data_train_mfg <- data_manufacturing[train_indices_mfg, ]
+data_holdout_mfg <- data_manufacturing[-train_indices_mfg, ]
+
+# Services
+train_indices_srv <- as.integer(createDataPartition(data_services$fast_growth, p = 0.8, list = FALSE))
+data_train_srv <- data_services[train_indices_srv, ]
+data_holdout_srv <- data_services[-train_indices_srv, ]
+
+# Check distribution of target variable in each subset
+industry_splits <- data.frame(
+  Dataset = c("Full Data", "Manufacturing", "Services"),
+  Total_Obs = c(nrow(data), nrow(data_manufacturing), nrow(data_services)),
+  Fast_Growth_Pct = c(
+    mean(data$fast_growth) * 100,
+    mean(data_manufacturing$fast_growth) * 100,
+    mean(data_services$fast_growth) * 100
+  ),
+  Train_Obs = c(NA, nrow(data_train_mfg), nrow(data_train_srv)),
+  Train_FG_Pct = c(
+    NA,
+    mean(data_train_mfg$fast_growth) * 100,
+    mean(data_train_srv$fast_growth) * 100
+  ),
+  Holdout_Obs = c(NA, nrow(data_holdout_mfg), nrow(data_holdout_srv)),
+  Holdout_FG_Pct = c(
+    NA,
+    mean(data_holdout_mfg$fast_growth) * 100,
+    mean(data_holdout_srv$fast_growth) * 100
+  )
+)
+
+kable(industry_splits,
+      caption = "Dataset Splits by Industry",
+      col.names = c("Dataset", "Total Obs", "% Fast Growth", 
+                    "Train Obs", "Train % FG", 
+                    "Holdout Obs", "Holdout % FG"),
+      digits = c(0, 0, 1, 0, 1, 0, 1))
+```
+
+The table confirms that our training/holdout splits preserve the
+original distribution of fast-growing firms in each industry. The
+manufacturing sector has a higher percentage of fast-growing firms
+compared to services, which may affect model performance.
+
+## Define Model and Loss Function
+
+We'll use the best performing model from Task 1 (Logistic Regression
+X4), applying it separately to each industry with the same loss
+function.
+
+```{r define_variables_loss}
+# Define variable sets (using X4 from Task 1)
+rawvars <-  c("curr_assets", "curr_liab", "extra_exp", "extra_inc", "extra_profit_loss", "fixed_assets",
+              "inc_bef_tax", "intang_assets", "inventories", "liq_assets", "material_exp", "personnel_exp",
+              "profit_loss_year", "sales", "share_eq", "subscribed_cap", "growth_past")
+qualityvars <- c("balsheet_flag", "balsheet_length", "balsheet_notfullyear")
+engvar <- c("total_assets_bs", "fixed_assets_bs", "liq_assets_bs", "curr_assets_bs",
+            "share_eq_bs", "subscribed_cap_bs", "intang_assets_bs", "extra_exp_pl",
+            "extra_inc_pl", "extra_profit_loss_pl", "inc_bef_tax_pl", "inventories_pl",
+            "material_exp_pl", "profit_loss_year_pl", "personnel_exp_pl")
+engvar2 <- c("extra_profit_loss_pl_quad", "inc_bef_tax_pl_quad",
+             "profit_loss_year_pl_quad", "share_eq_bs_quad")
+engvar3 <- c(grep("*flag_low$", names(data), value = TRUE),
+             grep("*flag_high$", names(data), value = TRUE),
+             grep("*flag_error$", names(data), value = TRUE),
+             grep("*flag_zero$", names(data), value = TRUE))
+d1 <-  c("d1_sales_mil_log_mod", "d1_sales_mil_log_mod_sq",
+         "flag_low_d1_sales_mil_log", "flag_high_d1_sales_mil_log")
+hr <- c("female", "ceo_age", "flag_high_ceo_age", "flag_low_ceo_age",
+        "flag_miss_ceo_age", "ceo_count", "labor_avg_mod",
+        "flag_miss_labor_avg", "foreign_management")
+# Define firm variables (removing ind and ind2_cat as we're splitting by industry_category)
+firm <- c("age", "age2", "new", "m_region_loc", "urban_m") 
+
+# Define X4 variables (our best model from Task 1, but without industry variables)
+X4 <- c("sales_mil_log", "sales_mil_log_sq", firm, engvar, engvar2, engvar3, d1, hr, qualityvars)
+
+# Define loss function (consistent with Task 1)
+FP <- 6  # Cost of false positive
+FN <- 5  # Cost of false negative
+cost <- FN/FP  # Cost ratio for ROC analysis
+```
+
+## Model Training for Manufacturing Industry
+
+We'll now train our logistic regression model for the manufacturing
+sector.
+
+```{r train_manufacturing_model}
+# Configure 5-fold cross-validation
+train_control <- trainControl(
+  method = "cv",              
+  number = 5,                 
+  classProbs = TRUE,          
+  summaryFunction = twoClassSummaryExtended,
+  savePredictions = TRUE      
+)
+
+# Train logistic regression model on manufacturing data
+set.seed(13505)
+logit_model_mfg <- train(
+  formula(paste0("fast_growth_f ~ ", paste0(X4, collapse = " + "))),
+  method = "glm",
+  data = data_train_mfg,
+  family = binomial,
+  trControl = train_control
+)
+
+# Calculate CV RMSE and AUC for manufacturing
+CV_RMSE_folds_mfg <- logit_model_mfg$resample[, c("Resample", "RMSE")]
+CV_RMSE_mfg <- mean(CV_RMSE_folds_mfg$RMSE)
+
+CV_AUC_folds_mfg <- list()
+for (fold in c("Fold1", "Fold2", "Fold3", "Fold4", "Fold5")) {
+  cv_fold <- logit_model_mfg$pred %>% filter(Resample == fold)
+  roc_obj <- roc(cv_fold$obs, cv_fold$fast_growth)
+  CV_AUC_folds_mfg[[fold]] <- as.numeric(roc_obj$auc)
+}
+CV_AUC_mfg <- mean(unlist(CV_AUC_folds_mfg))
+
+# Find optimal threshold for manufacturing using our loss function
+best_thresholds_cv_mfg <- list()
+expected_loss_cv_mfg <- list()
+
+prevalence_mfg <- mean(data_train_mfg$fast_growth)
+
+for (fold in c("Fold1", "Fold2", "Fold3", "Fold4", "Fold5")) {
+  cv_fold <- logit_model_mfg$pred %>% filter(Resample == fold)
+  roc_obj <- roc(cv_fold$obs, cv_fold$fast_growth)
+  
+  best_threshold <- coords(
+    roc_obj, 
+    "best", 
+    ret = "all", 
+    transpose = FALSE,
+    best.method = "youden", 
+    best.weights = c(cost, prevalence_mfg)
+  )
+  
+  best_thresholds_cv_mfg[[fold]] <- best_threshold$threshold
+  expected_loss_cv_mfg[[fold]] <- (best_threshold$fp*FP + best_threshold$fn*FN)/length(cv_fold$fast_growth)
+}
+
+# Average across folds
+best_threshold_mfg <- mean(unlist(best_thresholds_cv_mfg))
+expected_loss_mfg <- mean(unlist(expected_loss_cv_mfg))
+
+# Evaluate on holdout set
+mfg_predicted_probs <- predict(logit_model_mfg, newdata = data_holdout_mfg, type = "prob")
+data_holdout_mfg$pred_probs <- mfg_predicted_probs[, "fast_growth"]
+
+# Calculate holdout RMSE
+holdout_rmse_mfg <- RMSE(data_holdout_mfg$pred_probs, data_holdout_mfg$fast_growth)
+
+# Calculate holdout ROC and AUC
+roc_obj_holdout_mfg <- roc(data_holdout_mfg$fast_growth, data_holdout_mfg$pred_probs)
+auc_holdout_mfg <- as.numeric(roc_obj_holdout_mfg$auc)
+
+# Calculate expected loss on holdout with optimal threshold
+holdout_threshold_mfg <- coords(
+  roc_obj_holdout_mfg, 
+  x = best_threshold_mfg, 
+  input = "threshold",
+  ret = "all", 
+  transpose = FALSE
+)
+
+expected_loss_holdout_mfg <- (holdout_threshold_mfg$fp*FP + 
+                             holdout_threshold_mfg$fn*FN)/nrow(data_holdout_mfg)
+
+# Create confusion matrix
+mfg_predictions <- ifelse(
+  data_holdout_mfg$pred_probs < best_threshold_mfg, 
+  "no_fast_growth", 
+  "fast_growth"
+) %>% factor(levels = c("no_fast_growth", "fast_growth"))
+
+cm_mfg <- confusionMatrix(mfg_predictions, data_holdout_mfg$fast_growth_f)
+
+# Print key metrics for manufacturing model
+cat("Manufacturing Model Metrics:\n")
+cat("  CV RMSE:", round(CV_RMSE_mfg, 3), "\n")
+cat("  CV AUC:", round(CV_AUC_mfg, 3), "\n")
+cat("  Optimal Threshold:", round(best_threshold_mfg, 3), "\n")
+cat("  Holdout RMSE:", round(holdout_rmse_mfg, 3), "\n")
+cat("  Holdout AUC:", round(auc_holdout_mfg, 3), "\n")
+cat("  Expected Loss:", round(expected_loss_holdout_mfg, 3), "\n")
+```
+
+The manufacturing model's metrics reveal several important insights
+about its performance for predicting fast-growing firms. The CV RMSE of
+0.361 and holdout RMSE of 0.361 indicate consistent error rates between
+cross-validation and the holdout set, suggesting the model doesn't
+overfit.
+
+The AUC values (CV: 0.666, Holdout: 0.694) demonstrate moderate
+discriminative ability - better than random guessing (0.5) but far from
+perfect prediction. This indicates the model can partially distinguish
+between fast-growing and non-fast-growing manufacturing firms, though
+with considerable uncertainty.
+
+The most concerning metric is the infinite optimal threshold. This
+indicates that the ROC optimization procedure couldn't find any
+threshold that effectively balances sensitivity and specificity
+according to our cost function. Essentially, the model struggles to find
+a sensible decision boundary for classification under our defined loss
+function (FP=6, FN=5).
+
+The expected loss of 0.841 is relatively high, reflecting the
+classification challenges. This suggests that despite moderate AUC
+values, the model's practical utility for decision-making is limited by
+its inability to establish an optimal classification threshold.
+
+These results point to fundamental difficulties in predicting fast
+growth in manufacturing firms using our current approach, possibly due
+to more complex or different growth dynamics in this sector compared to
+services.
+
+## Model Training for Services Industry
+
+Now we'll train the same model for the services sector.
+
+```{r train_services_model}
+# Train logistic regression model on services data
+set.seed(13505)
+logit_model_srv <- train(
+  formula(paste0("fast_growth_f ~ ", paste0(X4, collapse = " + "))),
+  method = "glm",
+  data = data_train_srv,
+  family = binomial,
+  trControl = train_control
+)
+
+# Calculate CV RMSE and AUC for services
+CV_RMSE_folds_srv <- logit_model_srv$resample[, c("Resample", "RMSE")]
+CV_RMSE_srv <- mean(CV_RMSE_folds_srv$RMSE)
+
+CV_AUC_folds_srv <- list()
+for (fold in c("Fold1", "Fold2", "Fold3", "Fold4", "Fold5")) {
+  cv_fold <- logit_model_srv$pred %>% filter(Resample == fold)
+  roc_obj <- roc(cv_fold$obs, cv_fold$fast_growth)
+  CV_AUC_folds_srv[[fold]] <- as.numeric(roc_obj$auc)
+}
+CV_AUC_srv <- mean(unlist(CV_AUC_folds_srv))
+
+# Find optimal threshold for services using our loss function
+best_thresholds_cv_srv <- list()
+expected_loss_cv_srv <- list()
+
+prevalence_srv <- mean(data_train_srv$fast_growth)
+
+for (fold in c("Fold1", "Fold2", "Fold3", "Fold4", "Fold5")) {
+  cv_fold <- logit_model_srv$pred %>% filter(Resample == fold)
+  roc_obj <- roc(cv_fold$obs, cv_fold$fast_growth)
+  
+  best_threshold <- coords(
+    roc_obj, 
+    "best", 
+    ret = "all", 
+    transpose = FALSE,
+    best.method = "youden", 
+    best.weights = c(cost, prevalence_srv)
+  )
+  
+  best_thresholds_cv_srv[[fold]] <- best_threshold$threshold
+  expected_loss_cv_srv[[fold]] <- (best_threshold$fp*FP + best_threshold$fn*FN)/length(cv_fold$fast_growth)
+}
+
+# Average across folds
+best_threshold_srv <- mean(unlist(best_thresholds_cv_srv))
+expected_loss_srv <- mean(unlist(expected_loss_cv_srv))
+
+# Evaluate on holdout set
+srv_predicted_probs <- predict(logit_model_srv, newdata = data_holdout_srv, type = "prob")
+data_holdout_srv$pred_probs <- srv_predicted_probs[, "fast_growth"]
+
+# Calculate holdout RMSE
+holdout_rmse_srv <- RMSE(data_holdout_srv$pred_probs, data_holdout_srv$fast_growth)
+
+# Calculate holdout ROC and AUC
+roc_obj_holdout_srv <- roc(data_holdout_srv$fast_growth, data_holdout_srv$pred_probs)
+auc_holdout_srv <- as.numeric(roc_obj_holdout_srv$auc)
+
+# Calculate expected loss on holdout with optimal threshold
+holdout_threshold_srv <- coords(
+  roc_obj_holdout_srv, 
+  x = best_threshold_srv, 
+  input = "threshold",
+  ret = "all", 
+  transpose = FALSE
+)
+
+expected_loss_holdout_srv <- (holdout_threshold_srv$fp*FP + 
+                             holdout_threshold_srv$fn*FN)/nrow(data_holdout_srv)
+
+# Create confusion matrix
+srv_predictions <- ifelse(
+  data_holdout_srv$pred_probs < best_threshold_srv, 
+  "no_fast_growth", 
+  "fast_growth"
+) %>% factor(levels = c("no_fast_growth", "fast_growth"))
+
+cm_srv <- confusionMatrix(srv_predictions, data_holdout_srv$fast_growth_f)
+
+# Print key metrics for services model
+cat("Services Model Metrics:\n")
+cat("  CV RMSE:", round(CV_RMSE_srv, 3), "\n")
+cat("  CV AUC:", round(CV_AUC_srv, 3), "\n")
+cat("  Optimal Threshold:", round(best_threshold_srv, 3), "\n")
+cat("  Holdout RMSE:", round(holdout_rmse_srv, 3), "\n")
+cat("  Holdout AUC:", round(auc_holdout_srv, 3), "\n")
+cat("  Expected Loss:", round(expected_loss_holdout_srv, 3), "\n")
+```
+
+The services model shows better overall performance than the
+manufacturing model. With lower RMSE values (CV: 0.330, Holdout: 0.333)
+and higher AUC scores (CV: 0.724, Holdout: 0.719), it demonstrates
+superior predictive accuracy and discrimination ability. The consistent
+metrics between cross-validation and holdout sets indicate good
+generalization.
+
+However, like the manufacturing model, it also shows an infinite optimal
+threshold, suggesting difficulties in establishing a stable
+classification boundary under our cost function. Despite this challenge,
+its expected loss (0.716) is notably lower than manufacturing's (0.841),
+indicating that even with threshold optimization issues, the model makes
+more reliable predictions for service firms.
+
+The stronger performance for services suggests that growth patterns in
+this sector may be more consistently captured by our feature set, or
+that growth dynamics in service industries follow more predictable
+patterns than in manufacturing.
+
+## Comparing Industry-Specific Models
+
+Now let's compare model performance across industries to identify
+differences in fast growth prediction patterns.
+
+```{r industry_comparison}
+# Create performance comparison table
+performance_comparison <- data.frame(
+  Metric = c(
+    "CV RMSE", 
+    "CV AUC", 
+    "Optimal Threshold", 
+    "CV Expected Loss", 
+    "Holdout RMSE", 
+    "Holdout AUC", 
+    "Holdout Expected Loss",
+    "Prevalence (% Fast Growth)",
+    "Accuracy",
+    "Sensitivity/Recall",
+    "Specificity",
+    "Precision"
+  ),
+  Manufacturing = c(
+    CV_RMSE_mfg,
+    CV_AUC_mfg,
+    best_threshold_mfg,
+    expected_loss_mfg,
+    holdout_rmse_mfg,
+    auc_holdout_mfg,
+    expected_loss_holdout_mfg,
+    mean(data_holdout_mfg$fast_growth) * 100,
+    cm_mfg$overall["Accuracy"],
+    cm_mfg$byClass["Sensitivity"],
+    cm_mfg$byClass["Specificity"],
+    cm_mfg$byClass["Pos Pred Value"]
+  ),
+  Services = c(
+    CV_RMSE_srv,
+    CV_AUC_srv,
+    best_threshold_srv,
+    expected_loss_srv,
+    holdout_rmse_srv,
+    auc_holdout_srv,
+    expected_loss_holdout_srv,
+    mean(data_holdout_srv$fast_growth) * 100,
+    cm_srv$overall["Accuracy"],
+    cm_srv$byClass["Sensitivity"],
+    cm_srv$byClass["Specificity"],
+    cm_srv$byClass["Pos Pred Value"]
+  )
+)
+
+# Display formatted table
+kable(performance_comparison,
+      caption = "Model Performance Comparison Between Industries",
+      digits = c(0, 3, 3))
+```
+
+The performance comparison reveals interesting differences between the
+manufacturing and services models. Let's examine the confusion matrices
+to better understand the classification behavior.
+
+```{r confusion_matrices}
+# Display confusion matrices
+cat("Manufacturing Confusion Matrix:\n")
+print(cm_mfg$table)
+cat("\nServices Confusion Matrix:\n")
+print(cm_srv$table)
+
+# Create confusion matrix visualization
+confusion_mfg <- data.frame(
+  Prediction = rep(c("Predicted No Growth", "Predicted Fast Growth"), each = 2),
+  Actual = rep(c("Actual No Growth", "Actual Fast Growth"), 2),
+  Count = c(cm_mfg$table[1,1], cm_mfg$table[1,2], 
+           cm_mfg$table[2,1], cm_mfg$table[2,2]),
+  Industry = "Manufacturing"
+)
+
+confusion_srv <- data.frame(
+  Prediction = rep(c("Predicted No Growth", "Predicted Fast Growth"), each = 2),
+  Actual = rep(c("Actual No Growth", "Actual Fast Growth"), 2),
+  Count = c(cm_srv$table[1,1], cm_srv$table[1,2], 
+           cm_srv$table[2,1], cm_srv$table[2,2]),
+  Industry = "Services"
+)
+
+confusion_combined <- rbind(confusion_mfg, confusion_srv)
+
+# Create confusion matrix visualization
+ggplot(confusion_combined, 
+       aes(x = Actual, y = Prediction, fill = Count)) +
+  geom_tile() +
+  geom_text(aes(label = Count), color = "white", size = 4) +
+  scale_fill_viridis() +
+  facet_wrap(~Industry) +
+  labs(
+    title = "Confusion Matrices by Industry",
+    x = "Actual Class",
+    y = "Predicted Class"
+  ) +
+  theme_bg() +
+  theme(legend.position = "right")
+```
+
+The confusion matrices highlight differences in classification behavior
+between industries. Next, let's compare the ROC curves to visualize
+discrimination ability.
+
+```{r roc_comparison}
+# Compare ROC curves
+# Combine ROC data for plotting
+roc_data_mfg <- data.frame(
+  Specificity = 1 - roc_obj_holdout_mfg$specificities,
+  Sensitivity = roc_obj_holdout_mfg$sensitivities,
+  Industry = "Manufacturing"
+)
+
+roc_data_srv <- data.frame(
+  Specificity = 1 - roc_obj_holdout_srv$specificities,
+  Sensitivity = roc_obj_holdout_srv$sensitivities,
+  Industry = "Services"
+)
+
+roc_combined <- rbind(roc_data_mfg, roc_data_srv)
+
+# Plot combined ROC curves
+ggplot(roc_combined, aes(x = Specificity, y = Sensitivity, color = Industry)) +
+  geom_line(size = 1) +
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "gray") +
+  annotate("text", x = 0.75, y = 0.25, 
+           label = paste0("Manufacturing AUC: ", round(auc_holdout_mfg, 3)), 
+           color = "blue", size = 4) +
+  annotate("text", x = 0.75, y = 0.15, 
+           label = paste0("Services AUC: ", round(auc_holdout_srv, 3)), 
+           color = "red", size = 4) +
+  labs(
+    title = "ROC Curves by Industry",
+    x = "False Positive Rate (1 - Specificity)",
+    y = "True Positive Rate (Sensitivity)"
+  ) +
+  theme_bg() +
+  coord_equal() +
+  theme(legend.position = "bottom")
+```
+
+The ROC curves illustrate differences in discriminative ability between
+the two models. Let's now examine which features are most important for
+predicting fast growth in each industry.
+
+## Feature Importance Comparison
+
+```{r feature_importance}
+# Extract coefficients from logistic models
+coef_mfg <- coef(logit_model_mfg$finalModel)
+coef_srv <- coef(logit_model_srv$finalModel)
+
+# Convert to data frames and clean up names
+coef_mfg_df <- data.frame(
+  Variable = names(coef_mfg),
+  Coefficient = as.numeric(coef_mfg),
+  Industry = "Manufacturing"
+)
+
+coef_srv_df <- data.frame(
+  Variable = names(coef_srv),
+  Coefficient = as.numeric(coef_srv),
+  Industry = "Services"
+)
+
+# Combine
+all_coefs <- rbind(coef_mfg_df, coef_srv_df)
+
+# Find the top 10 most influential variables for each industry
+top_vars_mfg <- coef_mfg_df %>%
+  filter(Variable != "(Intercept)") %>%
+  arrange(desc(abs(Coefficient))) %>%
+  head(10)
+
+top_vars_srv <- coef_srv_df %>%
+  filter(Variable != "(Intercept)") %>%
+  arrange(desc(abs(Coefficient))) %>%
+  head(10)
+
+# Display top variables
+kable(top_vars_mfg, 
+      caption = "Top 10 Influential Variables - Manufacturing",
+      digits = 3)
+
+kable(top_vars_srv, 
+      caption = "Top 10 Influential Variables - Services",
+      digits = 3)
+
+# Find variables that appear in both top 10 lists
+common_top_vars <- intersect(top_vars_mfg$Variable, top_vars_srv$Variable)
+cat("Variables important in both industries:", paste(common_top_vars, collapse = ", "), "\n")
+
+# Compare coefficients for common variables
+if(length(common_top_vars) > 0) {
+  common_coefs <- all_coefs %>%
+    filter(Variable %in% common_top_vars) %>%
+    spread(Industry, Coefficient)
+  
+  kable(common_coefs, 
+        caption = "Comparison of Common Important Variables",
+        digits = 3)
+}
+
+# Visualize differences in top coefficients
+top_vars_combined <- c(top_vars_mfg$Variable, top_vars_srv$Variable) %>% unique()
+
+coef_comparison <- all_coefs %>%
+  filter(Variable %in% top_vars_combined, Variable != "(Intercept)") %>%
+  spread(Industry, Coefficient, fill = 0)
+
+# Calculate absolute magnitude for sorting
+coef_comparison$Magnitude <- (abs(coef_comparison$Manufacturing) + abs(coef_comparison$Services))/2
+
+# Plot top 15 most influential variables by average magnitude
+ggplot(coef_comparison %>% 
+         arrange(desc(Magnitude)) %>% 
+         head(15) %>%
+         gather(key = "Industry", value = "Coefficient", Manufacturing, Services),
+       aes(x = reorder(Variable, Magnitude), y = Coefficient, fill = Industry)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  coord_flip() +
+  labs(
+    title = "Top Predictor Variables by Industry",
+    x = "",
+    y = "Coefficient Value"
+  ) +
+  theme_bg() +
+  theme(legend.position = "bottom")
+```
+
+The coefficient comparison reveals which variables are most important
+for predicting fast growth in each industry, and how their impacts
+differ between sectors.
+
+## Summary of Industry-Specific Analysis
+
+```{r key_findings}
+# Find best and worst performing industry by AUC
+auc_values <- c(auc_holdout_mfg, auc_holdout_srv)
+industry_names <- c("Manufacturing", "Services")
+best_industry <- industry_names[which.max(auc_values)]
+worst_industry <- industry_names[which.min(auc_values)]
+
+# Calculate threshold difference
+threshold_diff <- abs(best_threshold_mfg - best_threshold_srv)
+
+# Check if any thresholds are infinite
+if(any(is.infinite(c(best_threshold_mfg, best_threshold_srv)))) {
+  cat("Note: Some industries have infinite optimal thresholds, indicating the ROC\n")
+  cat("optimization couldn't find a stable threshold that balances sensitivity\n")
+  cat("and specificity for our cost function.\n\n")
+}
+
+# Create a summary data frame for clearer comparison
+summary_df <- data.frame(
+  Industry = industry_names,
+  AUC = round(auc_values, 3),
+  Optimal_Threshold = c(best_threshold_mfg, best_threshold_srv),
+  Expected_Loss = c(expected_loss_holdout_mfg, expected_loss_holdout_srv),
+  stringsAsFactors = FALSE
+)
+
+# Display the summary
+print(summary_df)
+```
+
+## Discussion and Conclusion
+
+Our comprehensive comparison of manufacturing and services sectors
+reveals important insights into the predictive modeling of fast-growing
+firms across different industries.
+
+### Performance Differences
+
+The services model consistently outperforms the manufacturing model
+across all key metrics. With a higher AUC (0.719 vs. 0.694) and lower
+RMSE (0.333 vs. 0.361), the services model demonstrates superior
+discriminative ability and accuracy. This performance gap persists in
+both cross-validation and holdout evaluations, suggesting a fundamental
+difference in how well our feature set captures growth patterns across
+industries.
+
+The lower expected loss for services (0.716 vs. 0.841) further confirms
+this performance advantage, indicating that predictions for service
+firms are more reliable and cost-effective under our defined loss
+function.
+
+### Classification Challenges
+
+Both models exhibit interesting classification behavior as revealed by
+identical sensitivity (1.000) and specificity (0.000) values. This
+extreme classification pattern indicates that both models are
+classifying all observations as "no fast growth." This conservatism is
+reflected in the infinite optimal thresholds, which signal that our ROC
+optimization procedure couldn't identify any decision boundary that
+effectively balances sensitivity and specificity according to our cost
+function (FP=6, FN=5).
+
+Despite this classification challenge, the models still achieve
+reasonable accuracy (83.2% for manufacturing, 85.7% for services) due to
+the imbalanced nature of the dataset, where most firms are indeed not
+fast-growing.
+
+### Industry-Specific Growth Patterns
+
+The consistent performance gap between industries suggests that growth
+dynamics differ substantially between manufacturing and service firms.
+Several factors may explain this:
+
+1.  Manufacturing growth may depend more on capital-intensive
+    investments, technological innovation cycles, or supply chain
+    relationships that are difficult to capture in financial metrics
+    alone.
+
+2.  Service firm growth might follow more predictable patterns related
+    to market expansion, personnel quality, and location
+    advantages---factors that may be better reflected in our feature
+    set.
+
+3.  The slightly higher prevalence of fast-growing firms in
+    manufacturing (16.8% vs. 14.3%) suggests different growth
+    environments, which our one-size-fits-all modeling approach fails to
+    accommodate effectively.
+
+### Business Implications
+
+These findings have important practical implications for organizations
+seeking to identify high-growth firms:
+
+1.  **Industry-Specific Models**: Different screening criteria should be
+    applied when evaluating growth potential across industries. The same
+    model architecture performs differently depending on the sector.
+
+2.  **Classification Strategy**: The classification challenges suggest
+    that using predicted probabilities directly might be more useful
+    than binary classification, especially given the threshold
+    optimization difficulties.
+
+3.  **Risk Assessment**: Predictions for service firms appear more
+    reliable, suggesting higher confidence can be placed in these
+    assessments compared to manufacturing predictions.
+
+4.  **Feature Engineering**: Future models could benefit from
+    incorporating industry-specific indicators that better capture the
+    unique growth drivers in each sector.
+
+### Limitations and Future Directions
+
+Several limitations of this analysis suggest avenues for improvement:
+
+1.  **Alternative Loss Functions**: Different cost functions might yield
+    more stable optimal thresholds, especially if customized to each
+    industry's specific risk-reward profile.
+
+2.  **Feature Selection**: Industry-specific feature selection might
+    improve performance by focusing on the most relevant predictors for
+    each sector.
+
+3.  **Advanced Algorithms**: Non-linear methods like random forests
+    might better capture complex growth patterns, especially in
+    manufacturing.
+
+4.  **Handling Class Imbalance**: Techniques specifically designed for
+    imbalanced data could improve the models' ability to identify the
+    minority class of fast-growing firms.
+
+In conclusion, our analysis demonstrates that predicting fast growth
+requires industry-specific approaches. The performance differences
+between manufacturing and services highlight that growth dynamics vary
+significantly across sectors. While our current approach shows better
+promise for service industries, both sectors would benefit from tailored
+modeling strategies that account for their unique characteristics and
+growth drivers.
